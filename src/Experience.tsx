@@ -2,7 +2,16 @@ import { Canvas, useFrame, useLoader, useThree } from '@react-three/fiber'
 import { useMemo, useRef, useState, useEffect } from 'react'
 import * as THREE from 'three'
 
-const GLYPH_COUNT = 1180
+const GLYPH_COUNT = window.innerWidth < 720 ? 600 : 1180
+
+// Scene progress 0..1 across the three chapters, rewinding to 0 while the looped copy of chapter one scrolls in.
+function loopProgress() {
+  const end = document.getElementById('potential')?.offsetTop ?? 0
+  const wrap = document.getElementById('loop')?.offsetTop ?? 0
+  const y = window.scrollY
+  if (y <= end) return y / Math.max(1, end)
+  return 1 - Math.min(1, (y - end) / Math.max(1, wrap - end))
+}
 
 const vertexShader = /* glsl */ `
   uniform float uTime;
@@ -109,7 +118,7 @@ function GlyphField({ progress }: { progress: number }) {
 
   useFrame(({ clock }) => {
     if (!material.current) return
-    const pageProgress = window.scrollY / Math.max(1, document.documentElement.scrollHeight - window.innerHeight)
+    const pageProgress = loopProgress()
     pointer.current.lerp(new THREE.Vector2(cursor.x, cursor.y), 0.06)
     material.current.uniforms.uTime.value = clock.getElapsedTime()
     material.current.uniforms.uProgress.value = pageProgress
@@ -171,7 +180,7 @@ function NeuralNetwork({ progress }: { progress: number }) {
   }, [])
 
   useFrame(({ clock }) => {
-    const pageProgress = window.scrollY / Math.max(1, document.documentElement.scrollHeight - window.innerHeight)
+    const pageProgress = loopProgress()
     const visible = THREE.MathUtils.smoothstep(pageProgress, 0.23, 0.38) * (1 - THREE.MathUtils.smoothstep(pageProgress, 0.69, 0.84))
     if (group.current) {
       group.current.rotation.y = clock.getElapsedTime() * 0.06
@@ -211,7 +220,7 @@ function CosmicParticles() {
     return result
   }, [])
   useFrame(({ clock }) => {
-    const p = window.scrollY / Math.max(1, document.documentElement.scrollHeight - window.innerHeight)
+    const p = loopProgress()
     if (field.current) {
       field.current.rotation.y = clock.getElapsedTime() * 0.012
       field.current.rotation.z = Math.sin(clock.getElapsedTime() * 0.07) * 0.03
@@ -229,7 +238,7 @@ function CameraDirector() {
   const targetPosition = useRef(new THREE.Vector3())
   const targetLook = useRef(new THREE.Vector3())
   useFrame(({ clock }) => {
-    const p = window.scrollY / Math.max(1, document.documentElement.scrollHeight - window.innerHeight)
+    const p = loopProgress()
     const transitionOne = THREE.MathUtils.smoothstep(p, 0.22, 0.46)
     const transitionTwo = THREE.MathUtils.smoothstep(p, 0.57, 0.82)
     targetPosition.current.set(0, 0, 6.3).lerp(new THREE.Vector3(1.1, 0.08, 4.15), transitionOne).lerp(new THREE.Vector3(-0.42, 0.08, 5.7), transitionTwo)
@@ -250,7 +259,7 @@ function OreReference() {
   const texture = useLoader(THREE.TextureLoader, '/images/silvery-crystals-volcanic-ore.png')
   texture.colorSpace = THREE.SRGBColorSpace
   useFrame(() => {
-    const p = window.scrollY / Math.max(1, document.documentElement.scrollHeight - window.innerHeight)
+    const p = loopProgress()
     if (material.current) material.current.opacity = THREE.MathUtils.smoothstep(p, 0.69, 0.84)
   })
   return <mesh position={[size.width < 720 ? 1.05 : 2.55, -0.08, -0.35]} rotation={[0, -0.16, 0]}>
@@ -290,7 +299,7 @@ function RawOre({ progress }: { progress: number }) {
   }, [])
 
   useFrame(({ clock }) => {
-    const pageProgress = window.scrollY / Math.max(1, document.documentElement.scrollHeight - window.innerHeight)
+    const pageProgress = loopProgress()
     const visible = THREE.MathUtils.smoothstep(pageProgress, 0.68, 0.84)
     if (group.current) {
       group.current.rotation.y = clock.getElapsedTime() * 0.17
@@ -353,8 +362,9 @@ function useScrollProgress() {
     let current = 0
     let frame = 0
     const update = () => {
-      const max = document.documentElement.scrollHeight - window.innerHeight
-      target = max > 0 ? window.scrollY / max : 0
+      const wrap = document.getElementById('loop')?.offsetTop ?? 0
+      if (wrap > 0 && window.scrollY >= wrap) window.scrollTo({ top: window.scrollY - wrap, behavior: 'instant' })
+      target = loopProgress()
     }
     const tick = () => {
       current += (target - current) * 0.075
@@ -396,27 +406,39 @@ function useRenderPreferences() {
 export function Experience() {
   const progress = useScrollProgress()
   const { reducedMotion, documentVisible } = useRenderPreferences()
-  const [sound, setSound] = useState(false)
-
   return (
     <main>
       <div className="webgl-shell" aria-hidden="true"><SignalCanvas progress={progress} paused={reducedMotion || !documentVisible} /></div>
       <header className="chrome">
         <a className="brand" href="#signal" aria-label="Claude Expert home">claude<span>.expert</span></a>
         <nav aria-label="Chapters">
-          <a className="is-active" href="#signal">01 Signal</a>
-          <a href="#mind">02 Mind</a>
-          <a href="#potential">03 Potential</a>
+          <a className="is-active" href="#signal">Signal</a>
+          <a href="#mind">Mind</a>
+          <a href="#potential">Potential</a>
         </nav>
-        <button type="button" className="sound" onClick={() => setSound(!sound)} aria-pressed={sound}>
-          {sound ? 'Sound on' : 'Sound off'}
-        </button>
       </header>
 
-      <section id="signal" className="chapter signal">
-        <div className="chapter-index">01 / 03 — SIGNAL</div>
+      <SignalChapter id="signal" />
+
+      <section id="mind" className="chapter mind" aria-label="Chapter two: Mind">
+        <p>Mind</p>
+        <div><h2>Signals connect.<br /><em>Mind</em> awakens.</h2><span className="mind-caption">360 nodes / live pathway field</span></div>
+      </section>
+      <section id="potential" className="chapter potential" aria-label="Chapter three: Potential">
+        <p>Potential</p>
+        <div className="potential-copy"><h2>Knowledge,<br /><em>crystallised.</em></h2><p className="ore-note">A rare material. A limitless becoming.</p><a className="cta" href="https://claude-expert.pages.dev/">Learn how to do this <span>↗</span></a></div>
+      </section>
+      <SignalChapter id="loop" hidden />
+    </main>
+  )
+}
+
+// Chapter one, rendered twice: once at the top and once after chapter three as the seam for the infinite loop.
+function SignalChapter({ id, hidden = false }: { id: string; hidden?: boolean }) {
+  return (
+      <section id={id} className="chapter signal" aria-hidden={hidden || undefined}>
+        <div className="chapter-index">Signal</div>
         <div className="hero-copy">
-          <p className="eyebrow">Claude Expert presents</p>
           <h1>Knowledge<br /><em>begins</em> as signal.</h1>
           <p className="deck">Every breakthrough starts as a small, living pattern inside the noise.</p>
         </div>
@@ -429,17 +451,7 @@ export function Experience() {
           </div>
           <small>DECODE IN PROGRESS</small>
         </aside>
-        <div className="scroll-prompt"><span></span> Scroll to decode</div>
+        <div className="scroll-prompt">Scroll to decode</div>
       </section>
-
-      <section id="mind" className="chapter mind" aria-label="Chapter two: Mind">
-        <p>02 / 03 — MIND</p>
-        <div><h2>Signals connect.<br /><em>Intelligence</em> awakens.</h2><span className="mind-caption">360 nodes / live pathway field</span></div>
-      </section>
-      <section id="potential" className="chapter potential" aria-label="Chapter three: Potential">
-        <p>03 / 03 — POTENTIAL</p>
-        <div className="potential-copy"><h2>Knowledge,<br /><em>crystallised.</em></h2><p className="ore-note">A rare material. A limitless becoming.</p><a className="cta" href="https://claude-expert.pages.dev/">Learn how to do this <span>↗</span></a></div>
-      </section>
-    </main>
   )
 }
