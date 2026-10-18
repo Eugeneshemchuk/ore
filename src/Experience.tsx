@@ -1,52 +1,86 @@
-import { Canvas, useFrame, useLoader, useThree } from '@react-three/fiber'
+import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { useMemo, useRef, useState, useEffect } from 'react'
 import * as THREE from 'three'
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 
-const GLYPH_COUNT = window.innerWidth < 720 ? 600 : 1180
+// Alien runes plus half-width katakana (mirrored at draw time, as in the film) for the digital rain atlas.
+const RUNES = [...'ᚫϟ⊹ᛟ⌁⋔ᚢϞ⊙ᚨ⌇⟐ᛉ∴']
+const KATAKANA = [...'ﾊﾐﾋｰｳｼﾅﾓﾆｻﾜﾂｵﾘｱﾎﾃﾏｹﾒｴｶｷﾑﾕﾗｾﾈｽﾀﾇﾍ']
+const ATLAS_COLUMNS = 8
+const RAIN_CELL_PX = window.innerWidth < 720 ? 15 : 19
 
 // Scene progress 0..1 across the three chapters, rewinding to 0 while the looped copy of chapter one scrolls in.
+// The page repeats every loop period, so positions in the lead-in copy of chapter three map onto the real one.
 function loopProgress() {
-  const end = document.getElementById('potential')?.offsetTop ?? 0
-  const wrap = document.getElementById('loop')?.offsetTop ?? 0
-  const y = window.scrollY
+  const start = document.getElementById('signal')?.offsetTop ?? 0
+  const end = (document.getElementById('potential')?.offsetTop ?? 0) - start
+  const period = Math.max(1, (document.getElementById('loop')?.offsetTop ?? 0) - start)
+  const y = (((window.scrollY - start) % period) + period) % period
   if (y <= end) return y / Math.max(1, end)
-  return 1 - Math.min(1, (y - end) / Math.max(1, wrap - end))
+  return 1 - Math.min(1, (y - end) / Math.max(1, period - end))
 }
 
-const vertexShader = /* glsl */ `
-  uniform float uTime;
-  uniform float uProgress;
-  uniform vec2 uPointer;
-  attribute float aSeed;
-  attribute float aSize;
-  varying float vSignal;
+const rainVertexShader = /* glsl */ `
+  varying vec2 vUv;
   void main() {
-    vec3 p = position;
-    float wave = sin(p.y * 1.9 + uTime * 0.55 + aSeed * 10.0);
-    p.x += wave * 0.12;
-    p.z += sin(p.x * 2.4 + uTime * 0.3) * 0.06;
-    vec2 delta = p.xy - uPointer * vec2(5.2, 3.2);
-    float influence = smoothstep(2.2, 0.0, length(delta));
-    p.xy += normalize(delta + 0.001) * influence * 0.22;
-    vSignal = smoothstep(0.78, 0.98, fract(aSeed * 19.13 + uTime * 0.025 + p.y * 0.075));
-    vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
-    gl_PointSize = aSize * (62.0 / -mvPosition.z);
-    gl_Position = projectionMatrix * mvPosition;
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
   }
 `
 
-const fragmentShader = /* glsl */ `
+// Each column carries two independent drops; a drop is a bright leading glyph trailing a fading tail of decaying symbols.
+const rainFragmentShader = /* glsl */ `
+  uniform sampler2D uAtlas;
+  uniform vec2 uAtlasGrid;
+  uniform float uGlyphCount;
+  uniform vec2 uCells;
   uniform float uTime;
-  varying float vSignal;
+  uniform float uOpacity;
+  uniform vec2 uPointer;
+  varying vec2 vUv;
+
+  float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+
+  // Returns distance (in rows) behind the drop's head, or -1 when this cell is outside the drop.
+  float drop(float column, float row, float salt) {
+    float speed = 7.0 + hash(vec2(column, salt)) * 13.0;
+    float trail = 8.0 + hash(vec2(column, salt + 7.0)) * 22.0;
+    float period = uCells.y + trail + hash(vec2(column, salt + 3.0)) * uCells.y;
+    float head = floor(mod(uTime * speed + hash(vec2(column, salt + 1.0)) * period, period));
+    float behind = head - row;
+    return behind >= 0.0 && behind < trail ? behind / trail : -1.0;
+  }
+
   void main() {
-    vec2 uv = gl_PointCoord - 0.5;
-    float edge = 1.0 - smoothstep(0.34, 0.5, max(abs(uv.x), abs(uv.y)));
-    float notch = step(0.18, abs(uv.x)) * step(0.18, abs(uv.y));
-    float glyph = edge * (1.0 - notch * 0.55);
-    vec3 mineral = vec3(0.80, 0.86, 0.88);
-    vec3 ember = vec3(0.94, 0.31, 0.17);
-    vec3 color = mix(mineral, ember, vSignal);
-    gl_FragColor = vec4(color, glyph * mix(0.24, 0.95, vSignal));
+    vec2 grid = vUv * uCells;
+    vec2 cell = floor(grid);
+    vec2 local = fract(grid);
+    float row = uCells.y - 1.0 - cell.y;
+
+    float a = drop(cell.x, row, 0.0);
+    float b = drop(cell.x, row, 41.0);
+    float t = a < 0.0 ? b : (b < 0.0 ? a : min(a, b));
+
+    float near = smoothstep(0.22, 0.0, length((vUv - uPointer) * vec2(uCells.x / uCells.y, 1.0)));
+    if (t < 0.0 && near < 0.01) discard;
+
+    // Symbols mutate, faster near the head of a drop.
+    float rate = mix(9.0, 1.2, clamp(t, 0.0, 1.0)) * (0.4 + hash(cell));
+    float glyph = floor(hash(cell + floor(uTime * rate) * 0.137) * uGlyphCount);
+    vec2 atlasCell = vec2(mod(glyph, uAtlasGrid.x), floor(glyph / uAtlasGrid.x));
+    vec2 atlasUv = (atlasCell + vec2(local.x, 1.0 - local.y)) / uAtlasGrid;
+    vec2 gradient = vUv * uCells / uAtlasGrid;
+    float ink = textureGrad(uAtlas, vec2(atlasUv.x, 1.0 - atlasUv.y), dFdx(gradient), dFdy(gradient)).a;
+
+    float leader = t >= 0.0 ? step(t, 0.02) : 0.0;
+    float tail = t >= 0.0 ? pow(1.0 - t, 1.6) : 0.0;
+    vec3 green = vec3(0.12, 1.0, 0.42);
+    vec3 color = green * tail * 0.85 + vec3(0.78, 1.0, 0.86) * leader * 1.4 + green * near * 0.35;
+    float glow = exp(-dot(local - 0.5, local - 0.5) * 9.0) * leader * 0.18;
+    // Thin the rain behind the headline so the copy stays legible.
+    vec2 screen = (vUv - 0.5) * 1.2 + 0.5;
+    float copy = smoothstep(0.62, 0.42, screen.x) * smoothstep(0.22, 0.38, screen.y) * smoothstep(0.78, 0.62, screen.y);
+    gl_FragColor = vec4(color * ink + green * glow, 1.0) * uOpacity * (1.0 - copy * 0.6);
   }
 `
 
@@ -92,60 +126,71 @@ const oreFragmentShader = /* glsl */ `
   }
 `
 
-function GlyphField({ progress }: { progress: number }) {
-  const material = useRef<THREE.ShaderMaterial>(null)
-  const pointer = useRef(new THREE.Vector2(20, 20))
-  const { viewport, pointer: cursor } = useThree()
+function glyphAtlas() {
+  const glyphs = [...RUNES, ...KATAKANA]
+  const size = 64
+  const rows = Math.ceil(glyphs.length / ATLAS_COLUMNS)
+  const canvas = document.createElement('canvas')
+  canvas.width = ATLAS_COLUMNS * size
+  canvas.height = rows * size
+  const ctx = canvas.getContext('2d')!
+  ctx.fillStyle = '#fff'
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.font = `${size * 0.72}px "Apple Symbols", "Segoe UI Historic", "Noto Sans Runic", "Hiragino Sans", "MS Gothic", monospace`
+  glyphs.forEach((glyph, i) => {
+    const x = (i % ATLAS_COLUMNS) * size + size / 2
+    const y = Math.floor(i / ATLAS_COLUMNS) * size + size / 2
+    ctx.save()
+    ctx.translate(x, y)
+    if (i >= RUNES.length) ctx.scale(-1, 1)
+    ctx.fillText(glyph, 0, 0)
+    ctx.restore()
+  })
+  const texture = new THREE.CanvasTexture(canvas)
+  texture.anisotropy = 4
+  return { texture, grid: new THREE.Vector2(ATLAS_COLUMNS, rows), count: glyphs.length }
+}
 
-  const geometry = useMemo(() => {
-    const positions = new Float32Array(GLYPH_COUNT * 3)
-    const seeds = new Float32Array(GLYPH_COUNT)
-    const sizes = new Float32Array(GLYPH_COUNT)
-    for (let i = 0; i < GLYPH_COUNT; i += 1) {
-      const i3 = i * 3
-      positions[i3] = (Math.random() - 0.5) * 13
-      positions[i3 + 1] = (Math.random() - 0.5) * 8
-      positions[i3 + 2] = (Math.random() - 0.5) * 4 - 1.6
-      seeds[i] = Math.random()
-      sizes[i] = 0.48 + Math.random() * 0.8
-    }
-    const result = new THREE.BufferGeometry()
-    result.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-    result.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 1))
-    result.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1))
-    return result
-  }, [])
+function DigitalRain() {
+  const material = useRef<THREE.ShaderMaterial>(null)
+  const pointer = useRef(new THREE.Vector2(9, 9))
+  const { camera, size, pointer: cursor, viewport } = useThree()
+  const atlas = useMemo(glyphAtlas, [])
+  const depth = -1.5
+  // Oversize the plane so the camera's drift never reveals an edge.
+  const { width, height } = viewport.getCurrentViewport(camera, new THREE.Vector3(0, 0, depth))
+  const plane = { width: width * 1.2, height: height * 1.2 }
+  const columns = Math.round((size.width * 1.2) / RAIN_CELL_PX)
+  const cells = new THREE.Vector2(columns, Math.round(columns * (plane.height / plane.width) / 1.3))
+  const uniforms = useMemo(() => ({
+    uAtlas: { value: atlas.texture },
+    uAtlasGrid: { value: atlas.grid },
+    uGlyphCount: { value: atlas.count },
+    uCells: { value: new THREE.Vector2() },
+    uTime: { value: 0 },
+    uOpacity: { value: 1 },
+    uPointer: { value: new THREE.Vector2(9, 9) },
+  }), [atlas])
+  useEffect(() => () => atlas.texture.dispose(), [atlas])
 
   useFrame(({ clock }) => {
     if (!material.current) return
-    const pageProgress = loopProgress()
-    pointer.current.lerp(new THREE.Vector2(cursor.x, cursor.y), 0.06)
-    material.current.uniforms.uTime.value = clock.getElapsedTime()
-    material.current.uniforms.uProgress.value = pageProgress
-    material.current.opacity = 1 - THREE.MathUtils.smoothstep(pageProgress, 0.08, 0.45)
-    material.current.uniforms.uPointer.value.set(
-      pointer.current.x * viewport.width * 0.5,
-      pointer.current.y * viewport.height * 0.5,
-    )
+    const visible = 1 - THREE.MathUtils.smoothstep(loopProgress(), 0.08, 0.45)
+    pointer.current.lerp(new THREE.Vector2(cursor.x / 2.4 + 0.5, cursor.y / 2.4 + 0.5), 0.08)
+    // The material holds its own copy of the uniforms, so write through it rather than the memoized object.
+    const live = material.current.uniforms
+    live.uTime.value = clock.getElapsedTime()
+    live.uOpacity.value = visible * 0.82
+    live.uCells.value.copy(cells)
+    live.uPointer.value.copy(pointer.current)
+    material.current.visible = visible > 0.001
   })
 
-  return (
-    <points geometry={geometry} frustumCulled={false}>
-      <shaderMaterial
-        ref={material}
-        transparent
-        depthWrite={false}
-        blending={THREE.AdditiveBlending}
-        uniforms={{
-          uTime: { value: 0 },
-          uProgress: { value: 0 },
-          uPointer: { value: new THREE.Vector2(20, 20) },
-        }}
-        vertexShader={vertexShader}
-        fragmentShader={fragmentShader}
-      />
-    </points>
-  )
+  return <mesh position={[0, 0, depth]} renderOrder={-1} frustumCulled={false}>
+    <planeGeometry args={[plane.width, plane.height]} />
+    <shaderMaterial ref={material} transparent depthWrite={false} blending={THREE.AdditiveBlending} uniforms={uniforms} vertexShader={rainVertexShader} fragmentShader={rainFragmentShader} />
+  </mesh>
 }
 
 function NeuralNetwork({ progress }: { progress: number }) {
@@ -253,19 +298,197 @@ function CameraDirector() {
   return null
 }
 
-function OreReference() {
-  const material = useRef<THREE.MeshBasicMaterial>(null)
-  const { size } = useThree()
-  const texture = useLoader(THREE.TextureLoader, '/images/silvery-crystals-volcanic-ore.png')
-  texture.colorSpace = THREE.SRGBColorSpace
-  useFrame(() => {
+// Faceted hexagonal crystal: prism body with a pyramidal tip, lathed with six segments so every face stays flat.
+function crystalGeometry(radius: number, height: number) {
+  const tip = radius * 1.7
+  const points = [new THREE.Vector2(0, -height / 2), new THREE.Vector2(radius * 0.86, -height / 2), new THREE.Vector2(radius, height / 2 - tip), new THREE.Vector2(0, height / 2)]
+  const geometry = new THREE.LatheGeometry(points, 6).toNonIndexed()
+  geometry.computeVertexNormals()
+  // Smoky quartz: near-transparent glass at the root darkening to dense brown-grey at the tip (RGBA vertex colours).
+  const pos = geometry.attributes.position
+  const colors = new Float32Array(pos.count * 4)
+  const clear = new THREE.Color('#e4e8ea')
+  const smoke = new THREE.Color('#3a2c22')
+  const c = new THREE.Color()
+  for (let i = 0; i < pos.count; i += 1) {
+    const t = THREE.MathUtils.smoothstep(pos.getY(i), -height / 2, height / 2)
+    c.lerpColors(clear, smoke, t)
+    colors.set([c.r, c.g, c.b, THREE.MathUtils.lerp(0.12, 0.88, t)], i * 4)
+  }
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 4))
+  return geometry
+}
+
+// Ryugu-style spinning top: a double cone with a sharp equatorial ridge, rounded poles, light lumps and a few craters.
+const CRATERS = [new THREE.Vector3(0.7, 0.2, 0.68), new THREE.Vector3(-0.5, -0.45, 0.72), new THREE.Vector3(-0.8, 0.3, -0.5), new THREE.Vector3(0.2, -0.5, -0.8)].map((v) => v.normalize())
+function rockRadius(d: THREE.Vector3) {
+  const equator = 1.32
+  const pole = 1.12
+  const lat = Math.sqrt(1 - d.y * d.y)
+  const cone = 1 / (Math.abs(d.y) / pole + lat / equator)
+  let r = THREE.MathUtils.lerp(cone, 1.2, 0.18) * (1 + Math.sin(d.x * 4.1 + 1.3) * Math.sin(d.z * 3.7) * 0.04 + Math.sin(d.y * 13.0 + d.z * 11.0) * 0.015)
+  CRATERS.forEach((c, i) => { r -= Math.max(0, d.dot(c) - (i === 0 ? 0.9 : 0.95)) * 2.2 })
+  return r
+}
+
+function OreCrystal() {
+  const outer = useRef<THREE.Group>(null)
+  const group = useRef<THREE.Group>(null)
+  const materials = useRef<THREE.Material[]>([])
+  const hover = useRef(0)
+  const hit = useRef(false)
+  const mouse = useRef(new THREE.Vector2(9, 9))
+  // Drag-to-rotate: accumulated user spin plus a velocity that decays for a little inertia after release.
+  const drag = useRef({ active: false, x: 0, y: 0 })
+  const spin = useRef(new THREE.Vector2())
+  const spinVelocity = useRef(new THREE.Vector2())
+  const raycaster = useMemo(() => new THREE.Raycaster(), [])
+  const { size, gl } = useThree()
+  const mobile = size.width < 720
+  const envMap = useMemo(() => {
+    const pmrem = new THREE.PMREMGenerator(gl)
+    const texture = pmrem.fromScene(new RoomEnvironment(), 0.04).texture
+    pmrem.dispose()
+    return texture
+  }, [gl])
+  const scene = useMemo(() => {
+    const rock = new THREE.IcosahedronGeometry(1, 5)
+    const pos = rock.attributes.position
+    const v = new THREE.Vector3()
+    for (let i = 0; i < pos.count; i += 1) {
+      v.fromBufferAttribute(pos, i).normalize()
+      v.multiplyScalar(rockRadius(v))
+      pos.setXYZ(i, v.x, v.y, v.z)
+    }
+    rock.computeVertexNormals()
+    // Crystals: a dense vein bursting from the upper side plus scattered growths along the surface normals.
+    const crystals = Array.from({ length: 22 }, (_, i) => {
+      const vein = i < 9
+      const a = i * 2.4
+      const spread = vein ? 0.12 + (i % 4) * 0.1 : 0.9
+      const dir = vein
+        ? new THREE.Vector3(Math.cos(a) * spread + 0.25, 1, Math.sin(a) * spread + 0.2).normalize()
+        : new THREE.Vector3(Math.cos(a) * Math.sin(i * 1.7), Math.cos(i * 1.7) * 0.8, Math.sin(a) * Math.sin(i * 1.7)).normalize()
+      const height = vein ? (i === 0 ? 2.2 : 0.9 + ((i * 7) % 5) * 0.26) : 0.3 + (i % 4) * 0.12
+      const radius = vein ? (i === 0 ? 0.3 : 0.13 + (i % 3) * 0.05) : 0.06 + (i % 3) * 0.03
+      return {
+        geometry: crystalGeometry(radius, height),
+        position: dir.clone().multiplyScalar(rockRadius(dir) * 0.9 + height * 0.36),
+        quaternion: new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir),
+        tint: new THREE.Color().setHSL(0.07 + (i % 3) * 0.015, 0.12, 0.9 - (i % 4) * 0.05),
+      }
+    })
+    const rubble = Array.from({ length: 7 }, (_, i) => ({
+      position: new THREE.Vector3(Math.cos(i * 0.9) * (1.9 + (i % 3) * 0.25), Math.sin(i * 1.9) * 0.9, Math.sin(i * 0.9) * 1.6),
+      scale: 0.07 + (i % 3) * 0.05,
+    }))
+    const grid = new THREE.WireframeGeometry(new THREE.SphereGeometry(1.5, 18, 12))
+    // Ryugu is strewn with boulders, with one oversized block near the south pole.
+    const boulders = Array.from({ length: 36 }, (_, i) => {
+      const y = i === 0 ? -0.96 : 1 - (i / 35) * 2
+      const dir = new THREE.Vector3(Math.cos(i * 2.39996) * Math.sqrt(1 - y * y), y, Math.sin(i * 2.39996) * Math.sqrt(1 - y * y)).normalize()
+      const scale = i === 0 ? 0.24 : 0.035 + ((i * 5) % 7) * 0.012
+      return { position: dir.clone().multiplyScalar(rockRadius(dir) + scale * 0.3), scale, rotation: [i, i * 1.3, i * 0.7] as [number, number, number] }
+    })
+    return { rock, crystals, rubble, boulders, grid }
+  }, [])
+  const gridMaterial = useMemo(() => new THREE.LineBasicMaterial({ color: '#b9d6df', transparent: true, opacity: 0, depthWrite: false }), [])
+
+  useEffect(() => {
+    // The canvas ignores pointer events (content sits above it), so track the cursor and drags on the window.
+    const move = (e: PointerEvent) => {
+      mouse.current.set((e.clientX / window.innerWidth) * 2 - 1, -(e.clientY / window.innerHeight) * 2 + 1)
+      if (!drag.current.active) return
+      const dx = (e.clientX - drag.current.x) * 0.008
+      const dy = (e.clientY - drag.current.y) * 0.008
+      drag.current.x = e.clientX
+      drag.current.y = e.clientY
+      spin.current.x += dy
+      spin.current.y += dx
+      spinVelocity.current.set(dy, dx)
+    }
+    const down = (e: PointerEvent) => {
+      if (!hit.current) return
+      e.preventDefault()
+      drag.current = { active: true, x: e.clientX, y: e.clientY }
+      spinVelocity.current.set(0, 0)
+      document.body.style.cursor = 'grabbing'
+    }
+    const up = () => {
+      if (!drag.current.active) return
+      drag.current.active = false
+      document.body.style.cursor = hit.current ? 'grab' : ''
+    }
+    // Hold the page still while a touch drag is rotating the asteroid.
+    const touchMove = (e: TouchEvent) => { if (drag.current.active) e.preventDefault() }
+    window.addEventListener('pointermove', move, { passive: true })
+    window.addEventListener('pointerdown', down)
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', up)
+    window.addEventListener('touchmove', touchMove, { passive: false })
+    return () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerdown', down)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', up)
+      window.removeEventListener('touchmove', touchMove)
+      document.body.style.cursor = ''
+      envMap.dispose()
+      scene.rock.dispose()
+      scene.grid.dispose()
+      scene.crystals.forEach((c) => c.geometry.dispose())
+      gridMaterial.dispose()
+    }
+  }, [envMap, scene, gridMaterial])
+
+  useFrame(({ clock, camera }) => {
     const p = loopProgress()
-    if (material.current) material.current.opacity = THREE.MathUtils.smoothstep(p, 0.69, 0.84)
+    const visible = THREE.MathUtils.smoothstep(p, 0.69, 0.84)
+    const t = clock.getElapsedTime()
+    if (group.current && outer.current) {
+      if (!drag.current.active) {
+        spin.current.add(spinVelocity.current)
+        spinVelocity.current.multiplyScalar(0.94)
+      }
+      spin.current.x = THREE.MathUtils.clamp(spin.current.x, -1.2, 1.2)
+      group.current.rotation.y = t * 0.12 + p * Math.PI * 1.5 + spin.current.y
+      group.current.rotation.x = 0.12 + Math.sin(t * 0.3) * 0.06 + (p - 0.8) * 0.4 + spin.current.x
+      outer.current.position.y = -0.38 + Math.sin(t * 0.6) * 0.08 + (0.8 - p) * 0.9
+      outer.current.scale.setScalar((mobile ? 0.744 : 1.14) * (0.7 + visible * 0.3))
+      raycaster.setFromCamera(mouse.current, camera)
+      const wasHit = hit.current
+      hit.current = visible > 0.5 && raycaster.intersectObject(group.current, true).length > 0
+      if (hit.current !== wasHit && !drag.current.active) document.body.style.cursor = hit.current ? 'grab' : ''
+      hover.current = THREE.MathUtils.lerp(hover.current, hit.current || drag.current.active ? 1 : 0, 0.08)
+    }
+    materials.current.forEach((material) => {
+      material.opacity = visible
+      material.visible = visible > 0.001
+    })
+    gridMaterial.opacity = hover.current * visible * 0.22
   })
-  return <mesh position={[size.width < 720 ? 1.05 : 2.55, -0.08, -0.35]} rotation={[0, -0.16, 0]}>
-    <planeGeometry args={[size.width < 720 ? 3.9 : 5.15, size.width < 720 ? 3.9 : 5.15]} />
-    <meshBasicMaterial ref={material} map={texture} transparent opacity={0} toneMapped={false} />
-  </mesh>
+
+  const keep = (material: THREE.Material | null) => { if (material && !materials.current.includes(material)) materials.current.push(material) }
+  return <group ref={outer} position={[mobile ? 1.25 : 2.75, -0.38, -0.35]}>
+    <group ref={group}>
+      <mesh geometry={scene.rock}>
+        <meshStandardMaterial ref={keep} color="#2e3133" envMap={envMap} envMapIntensity={0.35} roughness={0.92} metalness={0.25} flatShading transparent opacity={0} />
+      </mesh>
+      {scene.crystals.map((c, index) => <mesh key={index} geometry={c.geometry} position={c.position} quaternion={c.quaternion}>
+        <meshPhysicalMaterial ref={keep} color={c.tint} vertexColors envMap={envMap} envMapIntensity={1.6} metalness={0.05} roughness={0.08} ior={1.54} specularIntensity={1} clearcoat={1} clearcoatRoughness={0.04} iridescence={0.25} iridescenceIOR={1.4} iridescenceThicknessRange={[180, 620]} flatShading side={THREE.DoubleSide} depthWrite={false} transparent opacity={0} />
+      </mesh>)}
+      {scene.boulders.map((b, index) => <mesh key={`b${index}`} position={b.position} scale={b.scale} rotation={b.rotation}>
+        <dodecahedronGeometry args={[1, 0]} />
+        <meshStandardMaterial ref={keep} color="#34383a" roughness={0.95} metalness={0.2} flatShading transparent opacity={0} />
+      </mesh>)}
+      {scene.rubble.map((r, index) => <mesh key={index} position={r.position} scale={r.scale} rotation={[index, index * 2, 0]}>
+        <dodecahedronGeometry args={[1, 0]} />
+        <meshStandardMaterial ref={keep} color="#4a4f52" roughness={0.9} metalness={0.3} flatShading transparent opacity={0} />
+      </mesh>)}
+      <lineSegments geometry={scene.grid} material={gridMaterial} raycast={() => null} />
+    </group>
+    <pointLight position={[1.4, 2.4, 2.2]} intensity={7} color="#eef4ff" distance={7} />
+  </group>
 }
 
 function RawOre({ progress }: { progress: number }) {
@@ -346,10 +569,10 @@ function SignalCanvas({ progress, paused }: { progress: number; paused: boolean 
       <ambientLight intensity={0.25} color="#b7c5ca" />
       <pointLight position={[3, 2, 4]} intensity={14} color="#f06e4e" distance={10} />
       <pointLight position={[-4, -2, 2]} intensity={8} color="#b9d6df" distance={10} />
-      <GlyphField progress={progress} />
+      <DigitalRain />
       <CosmicParticles />
       <NeuralNetwork progress={progress} />
-      <OreReference />
+      <OreCrystal />
       <CameraDirector />
     </Canvas>
   )
@@ -361,9 +584,18 @@ function useScrollProgress() {
     let target = 0
     let current = 0
     let frame = 0
-    const update = () => {
+    // Chapter three is copied above chapter one and chapter one below chapter three, so the page can jump
+    // by one loop period at either seam without a visible change and without ever reaching the document edges.
+    const seams = () => {
+      const start = document.getElementById('signal')?.offsetTop ?? 0
       const wrap = document.getElementById('loop')?.offsetTop ?? 0
-      if (wrap > 0 && window.scrollY >= wrap) window.scrollTo({ top: window.scrollY - wrap, behavior: 'instant' })
+      return { start, period: wrap - start }
+    }
+    const update = () => {
+      const { start, period } = seams()
+      const y = window.scrollY
+      if (period > 0 && y >= start + period) window.scrollTo({ top: y - period, behavior: 'instant' })
+      else if (period > 0 && y < start) window.scrollTo({ top: y + period, behavior: 'instant' })
       target = loopProgress()
     }
     const tick = () => {
@@ -371,6 +603,8 @@ function useScrollProgress() {
       setProgress(current)
       frame = requestAnimationFrame(tick)
     }
+    if ('scrollRestoration' in history) history.scrollRestoration = 'manual'
+    if (!location.hash) window.scrollTo({ top: seams().start, behavior: 'instant' })
     update()
     window.addEventListener('scroll', update, { passive: true })
     window.addEventListener('resize', update)
@@ -418,16 +652,14 @@ export function Experience() {
         </nav>
       </header>
 
+      <PotentialChapter id="lead" hidden />
       <SignalChapter id="signal" />
 
       <section id="mind" className="chapter mind" aria-label="Chapter two: Mind">
         <p>Mind</p>
-        <div><h2>Signals connect.<br /><em>Mind</em> awakens.</h2><span className="mind-caption">360 nodes / live pathway field</span></div>
+        <div><h2>Applied knowledge<br />is <em>Value.</em></h2><span className="mind-caption">360 nodes / live pathway field</span></div>
       </section>
-      <section id="potential" className="chapter potential" aria-label="Chapter three: Potential">
-        <p>Potential</p>
-        <div className="potential-copy"><h2>Knowledge,<br /><em>crystallised.</em></h2><p className="ore-note">A rare material. A limitless becoming.</p><a className="cta" href="https://claude-expert.pages.dev/">Learn how to do this <span>↗</span></a></div>
-      </section>
+      <PotentialChapter id="potential" />
       <SignalChapter id="loop" hidden />
     </main>
   )
@@ -439,19 +671,20 @@ function SignalChapter({ id, hidden = false }: { id: string; hidden?: boolean })
       <section id={id} className="chapter signal" aria-hidden={hidden || undefined}>
         <div className="chapter-index">Signal</div>
         <div className="hero-copy">
-          <h1>Knowledge<br /><em>begins</em> as signal.</h1>
+          <h1>Knowledge<br />is <em>abundant.</em></h1>
           <p className="deck">Every breakthrough starts as a small, living pattern inside the noise.</p>
         </div>
-        <aside className="alien-card" aria-label="Synthetic signal trace">
-          <span>ORIGIN / 0001</span>
-          <div className="glyph-sequence" aria-hidden="true">
-            <i>ᚫ</i><i>ϟ</i><i>⊹</i><i>ᛟ</i><i>⌁</i>
-            <i>⋔</i><i>ᚢ</i><i>Ϟ</i><i>⊙</i><i>ᚨ</i>
-            <i>⌇</i><i>⟐</i><i>ᛉ</i><i>ϟ</i><i>∴</i>
-          </div>
-          <small>DECODE IN PROGRESS</small>
-        </aside>
         <div className="scroll-prompt">Scroll to decode</div>
+      </section>
+  )
+}
+
+// Chapter three, rendered twice: once in place and once above chapter one as the seam for scrolling upward.
+function PotentialChapter({ id, hidden = false }: { id: string; hidden?: boolean }) {
+  return (
+      <section id={id} className="chapter potential" aria-label={hidden ? undefined : 'Chapter three: Potential'} aria-hidden={hidden || undefined} inert={hidden || undefined}>
+        <p>Potential</p>
+        <div className="potential-copy"><h2>Learn how to<br /><em>create value</em></h2><p className="ore-note">A rare material. A limitless becoming.</p><a className="cta" href="https://claude-expert.pages.dev/">Learn how to do this <span>↗</span></a></div>
       </section>
   )
 }
