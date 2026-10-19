@@ -1447,8 +1447,13 @@ function SoundToggle() {
   const [enabled, setEnabled] = useState(false)
   const [starting, setStarting] = useState(false)
   const [error, setError] = useState(false)
+  const [showSoundHint, setShowSoundHint] = useState(true)
 
   useEffect(() => () => { void sound.current?.close(); sound.current = null }, [])
+  useEffect(() => {
+    const timer = window.setTimeout(() => setShowSoundHint(false), 3000)
+    return () => window.clearTimeout(timer)
+  }, [])
   useEffect(() => {
     if (!enabled) return
     const motionPreference = window.matchMedia('(prefers-reduced-motion: reduce)')
@@ -1590,9 +1595,10 @@ function SoundToggle() {
   }
 
   return <div className="sound-control">
-    <button type="button" className="sound-toggle" aria-pressed={enabled} aria-label={enabled ? 'Turn sound off' : 'Turn sound on'} disabled={starting} onClick={() => void toggle()}>
+    <button type="button" className="sound-toggle" aria-pressed={enabled} aria-label={enabled ? 'Turn sound off' : 'Turn sound on'} disabled={starting} onClick={() => { setShowSoundHint(false); void toggle() }}>
       <span className="sound-indicator" aria-hidden="true" /> Sound {enabled ? 'on' : 'off'}
     </button>
+    {showSoundHint && <span className="sound-hint" aria-hidden="true">Better with sound</span>}
     {error && <span className="sound-error" role="status">Sound unavailable</span>}
   </div>
 }
@@ -1678,7 +1684,7 @@ function PotentialChapter({ id, hidden = false, buttonAnchor }: { id: string; hi
   return (
       <section id={id} className="chapter potential" aria-label={hidden ? undefined : 'Chapter three: Potential'} aria-hidden={hidden || undefined} inert={hidden || undefined}>
         <p>Potential</p>
-        <div className="potential-copy"><RainHeadline lines={['Learn how to', 'build this', 'in 5 days']} onReveal={revealTitle} /><span ref={buttonAnchor} className="cta-anchor"><a className={`cta ${titleRevealed ? 'cta-arriving' : 'cta-waiting'}`} href="https://claude-expert.pages.dev/"><span className="cta-sweep" aria-hidden="true" /><span className="cta-glyphs" aria-hidden="true">ᚫ ⊹ ᛟ ⌁</span><span className="cta-label">become claude.expert</span><span className="cta-arrow" aria-hidden="true">↗︎</span></a></span></div>
+        <div className="potential-copy"><RainHeadline lines={['Create', 'Experiences', 'like this', 'in 5 days']} onReveal={revealTitle} /><span ref={buttonAnchor} className="cta-anchor"><a className={`cta ${titleRevealed ? 'cta-arriving' : 'cta-waiting'}`} href="https://claude-expert.pages.dev/"><span className="cta-sweep" aria-hidden="true" /><span className="cta-glyphs" aria-hidden="true">ᚫ ⊹ ᛟ ⌁</span><span className="cta-label">become claude.expert</span><span className="cta-arrow" aria-hidden="true">↗︎</span></a></span></div>
       </section>
   )
 }
