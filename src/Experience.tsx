@@ -261,9 +261,69 @@ function DigitalRain({ reducedMotion }: { reducedMotion: boolean }) {
 
 const NEURON_ANCHOR = new THREE.Vector3(0, 0, 0.9)
 
-function NeuralNetwork({ group }: { group: RefObject<THREE.Group | null> }) {
+type RepulsionUniforms = {
+  uRepelPointer: { value: THREE.Vector2 }
+  uRepelAspect: { value: number }
+  uRepelStrength: { value: number }
+}
+
+// Work in screen space so particles at different depths all respond around the
+// cursor. Applying the same displacement to link endpoints keeps them attached.
+function configureRepulsion(shader: THREE.WebGLProgramParametersWithUniforms, uniforms: RepulsionUniforms) {
+  Object.assign(shader.uniforms, uniforms)
+  shader.vertexShader = shader.vertexShader
+    .replace('#include <common>', `#include <common>
+      uniform vec2 uRepelPointer;
+      uniform float uRepelAspect;
+      uniform float uRepelStrength;`)
+    .replace('#include <project_vertex>', `#include <project_vertex>
+      if (gl_Position.w > 0.0) {
+        vec2 screen = gl_Position.xy / gl_Position.w;
+        vec2 delta = (screen - uRepelPointer) * vec2(uRepelAspect, 1.0);
+        float distanceToPointer = length(delta);
+        float influence = 1.0 - smoothstep(0.0, 0.28, distanceToPointer);
+        vec2 direction = delta / max(distanceToPointer, 0.001);
+        gl_Position.xy += direction / vec2(uRepelAspect, 1.0)
+          * influence * 0.16 * uRepelStrength * gl_Position.w;
+      }`)
+}
+
+function RepulsionController({ uniforms, reducedMotion }: { uniforms: RepulsionUniforms; reducedMotion: boolean }) {
+  const target = useRef(new THREE.Vector2(0, 0))
+  const active = useRef(false)
+  const { size } = useThree()
+  useEffect(() => {
+    const move = (event: PointerEvent) => {
+      if (event.pointerType === 'touch') { active.current = false; return }
+      target.current.set(event.clientX / window.innerWidth * 2 - 1, 1 - event.clientY / window.innerHeight * 2)
+      active.current = true
+    }
+    const leave = (event: PointerEvent) => { if (!event.relatedTarget) active.current = false }
+    const blur = () => { active.current = false }
+    window.addEventListener('pointermove', move, { passive: true })
+    window.addEventListener('pointerout', leave)
+    window.addEventListener('blur', blur)
+    return () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerout', leave)
+      window.removeEventListener('blur', blur)
+    }
+  }, [])
+  useFrame((_, delta) => {
+    const damping = 1 - Math.exp(-Math.min(delta, 0.1) * 9)
+    uniforms.uRepelPointer.value.lerp(target.current, damping)
+    uniforms.uRepelAspect.value = size.width / Math.max(1, size.height)
+    const sceneStrength = THREE.MathUtils.smoothstep(signalDeparture(chapterPhase()), 0.65, 0.95)
+    const desired = active.current && !reducedMotion ? sceneStrength : 0
+    uniforms.uRepelStrength.value = THREE.MathUtils.lerp(uniforms.uRepelStrength.value, desired, damping)
+  })
+  return null
+}
+
+function NeuralNetwork({ group, repulsion }: { group: RefObject<THREE.Group | null>; repulsion: RepulsionUniforms }) {
   const nodeMaterial = useRef<THREE.PointsMaterial>(null)
   const lineMaterial = useRef<THREE.LineBasicMaterial>(null)
+  const repelShader = useMemo(() => (shader: THREE.WebGLProgramParametersWithUniforms) => configureRepulsion(shader, repulsion), [repulsion])
   const nodeTexture = useMemo(() => {
     const canvas = document.createElement('canvas')
     canvas.width = canvas.height = 64
@@ -323,17 +383,18 @@ function NeuralNetwork({ group }: { group: RefObject<THREE.Group | null> }) {
 
   return <group ref={group} position={[1.55, -0.1, -0.55]}>
     <lineSegments geometry={links}>
-      <lineBasicMaterial ref={lineMaterial} color="#d9e3e5" transparent opacity={0} depthWrite={false} />
+      <lineBasicMaterial ref={lineMaterial} color="#d9e3e5" transparent opacity={0} depthWrite={false} onBeforeCompile={repelShader} />
     </lineSegments>
     <points geometry={nodes}>
-      <pointsMaterial ref={nodeMaterial} map={nodeTexture} color="#f06e4e" transparent opacity={0} size={0.065} sizeAttenuation depthWrite={false} blending={THREE.AdditiveBlending} />
+      <pointsMaterial ref={nodeMaterial} map={nodeTexture} color="#f06e4e" transparent opacity={0} size={0.065} sizeAttenuation depthWrite={false} blending={THREE.AdditiveBlending} onBeforeCompile={repelShader} />
     </points>
   </group>
 }
 
-function CosmicParticles() {
+function CosmicParticles({ repulsion }: { repulsion: RepulsionUniforms }) {
   const field = useRef<THREE.Points>(null)
   const material = useRef<THREE.PointsMaterial>(null)
+  const repelShader = useMemo(() => (shader: THREE.WebGLProgramParametersWithUniforms) => configureRepulsion(shader, repulsion), [repulsion])
   const geometry = useMemo(() => {
     const positions = new Float32Array(620 * 3)
     for (let i = 0; i < 620; i += 1) {
@@ -355,7 +416,7 @@ function CosmicParticles() {
     if (material.current) material.current.opacity = 0.14 + THREE.MathUtils.smoothstep(p, 0.52, 0.88) * 0.42
   })
   return <points ref={field} geometry={geometry}>
-    <pointsMaterial ref={material} color="#d7e2e2" size={0.024} sizeAttenuation transparent opacity={0.14} depthWrite={false} />
+    <pointsMaterial ref={material} color="#d7e2e2" size={0.024} sizeAttenuation transparent opacity={0.14} depthWrite={false} onBeforeCompile={repelShader} />
   </points>
 }
 
@@ -501,7 +562,7 @@ function configureOreScan(shader: THREE.WebGLProgramParametersWithUniforms, unif
       float lattice = scanGrid(scanCoord.yz) * scanWeights.x
                     + scanGrid(scanCoord.xz) * scanWeights.y
                     + scanGrid(scanCoord.xy) * scanWeights.z;
-      totalEmissiveRadiance += vec3(0.53, 0.72, 0.86) * uScanStrength
+      totalEmissiveRadiance += vec3(1.0, 0.34, 0.08) * uScanStrength
         * lattice * (scanArea * 0.12 + pulse * 0.72);`)
 }
 
@@ -867,6 +928,11 @@ function SignalCanvas({ reducedMotion, documentVisible }: { reducedMotion: boole
   const neuralGroup = useRef<THREE.Group>(null)
   const oreGroup = useRef<THREE.Group>(null)
   const crystalTip = useRef<THREE.Object3D>(null)
+  const repulsion = useMemo<RepulsionUniforms>(() => ({
+    uRepelPointer: { value: new THREE.Vector2() },
+    uRepelAspect: { value: 1 },
+    uRepelStrength: { value: 0 },
+  }), [])
   return (
     <Canvas
       dpr={[1, window.innerWidth < 720 ? 1.5 : 2]}
@@ -881,8 +947,9 @@ function SignalCanvas({ reducedMotion, documentVisible }: { reducedMotion: boole
       <pointLight position={[3, 2, 4]} intensity={14} color="#f06e4e" distance={10} />
       <pointLight position={[-4, -2, 2]} intensity={8} color="#b9d6df" distance={10} />
       <DigitalRain reducedMotion={reducedMotion} />
-      <CosmicParticles />
-      <NeuralNetwork group={neuralGroup} />
+      <RepulsionController uniforms={repulsion} reducedMotion={reducedMotion} />
+      <CosmicParticles repulsion={repulsion} />
+      <NeuralNetwork group={neuralGroup} repulsion={repulsion} />
       <OreCrystal group={oreGroup} crystalTip={crystalTip} reducedMotion={reducedMotion} />
       <CameraDirector reducedMotion={reducedMotion} neuralGroup={neuralGroup} oreGroup={oreGroup} crystalTip={crystalTip} />
       <RenderOnScroll enabled={reducedMotion && documentVisible} />
