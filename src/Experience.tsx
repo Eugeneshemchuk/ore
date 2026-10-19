@@ -359,13 +359,13 @@ function CosmicParticles() {
   </points>
 }
 
-function CameraDirector({ reducedMotion, neuralGroup }: { reducedMotion: boolean; neuralGroup: RefObject<THREE.Group | null> }) {
+function CameraDirector({ reducedMotion, neuralGroup, oreGroup, crystalTip }: { reducedMotion: boolean; neuralGroup: RefObject<THREE.Group | null>; oreGroup: RefObject<THREE.Group | null>; crystalTip: RefObject<THREE.Object3D | null> }) {
   const { camera, pointer } = useThree()
   const currentLook = useRef(new THREE.Vector3())
   const targetPosition = useRef(new THREE.Vector3())
   const targetLook = useRef(new THREE.Vector3())
   const mindPosition = useMemo(() => new THREE.Vector3(1.1, 0.08, 4.15), [])
-  const orePosition = useMemo(() => new THREE.Vector3(-0.42, 0.08, 5.7), [])
+  const orePosition = useMemo(() => new THREE.Vector3(-0.42, 0.08, 7.2), [])
   const signalPosition = useMemo(() => new THREE.Vector3(0, 0, 6.3), [])
   const signalLook = useMemo(() => new THREE.Vector3(0, 0, 0), [])
   const mindLook = useMemo(() => new THREE.Vector3(2.05, 0, -0.65), [])
@@ -373,6 +373,10 @@ function CameraDirector({ reducedMotion, neuralGroup }: { reducedMotion: boolean
   const anchorWorld = useMemo(() => new THREE.Vector3(), [])
   const closePosition = useMemo(() => new THREE.Vector3(), [])
   const closeOffset = useMemo(() => new THREE.Vector3(0.025, 0.015, 0.32), [])
+  const oreCenter = useMemo(() => new THREE.Vector3(), [])
+  const oreDirection = useMemo(() => new THREE.Vector3(), [])
+  const oreDetail = useMemo(() => new THREE.Vector3(), [])
+  const oreClosePosition = useMemo(() => new THREE.Vector3(), [])
   useFrame(({ clock }) => {
     const phase = chapterPhase()
     const transitionOne = THREE.MathUtils.smoothstep(phase, 0.35, 0.95)
@@ -394,6 +398,20 @@ function CameraDirector({ reducedMotion, neuralGroup }: { reducedMotion: boolean
         targetPosition.current.lerp(closePosition, closeUp)
         targetLook.current.lerp(anchorWorld, closeUp)
       }
+      if (phase >= 1 && phase < 2 && oreGroup.current && crystalTip.current) {
+        // Follow the real tip of the main crystal through the specimen's
+        // rotation, then pull back into the established final composition.
+        oreGroup.current.getWorldPosition(oreCenter)
+        oreDirection.copy(orePosition).sub(oreCenter).normalize()
+        crystalTip.current.getWorldPosition(oreDetail)
+        oreDetail.y -= 0.14
+        oreClosePosition.copy(oreDetail).addScaledVector(oreDirection, 1.35)
+        const oreCloseUp = THREE.MathUtils.smoothstep(phase, 1.34, 1.54)
+          * (1 - THREE.MathUtils.smoothstep(phase, 1.63, 1.98))
+        targetPosition.current.lerp(oreClosePosition, oreCloseUp)
+        targetLook.current.lerp(oreDetail, oreCloseUp)
+        closeUp = Math.max(closeUp, oreCloseUp)
+      }
       targetPosition.current.x += pointer.x * 0.22 * (1 - closeUp)
       targetPosition.current.y += pointer.y * 0.14 * (1 - closeUp)
       targetPosition.current.z += Math.sin(clock.getElapsedTime() * 0.45) * 0.13 * (1 - closeUp)
@@ -411,45 +429,178 @@ function crystalGeometry(radius: number, height: number) {
   const points = [new THREE.Vector2(0, -height / 2), new THREE.Vector2(radius * 0.86, -height / 2), new THREE.Vector2(radius, height / 2 - tip), new THREE.Vector2(0, height / 2)]
   const geometry = new THREE.LatheGeometry(points, 6).toNonIndexed()
   geometry.computeVertexNormals()
-  // Smoky quartz: near-transparent glass at the root darkening to dense brown-grey at the tip (RGBA vertex colours).
+  // Small tonal variations keep the existing facets from looking uniformly white.
   const pos = geometry.attributes.position
-  const colors = new Float32Array(pos.count * 4)
-  const clear = new THREE.Color('#e4e8ea')
-  const smoke = new THREE.Color('#3a2c22')
+  const colors = new Float32Array(pos.count * 3)
+  const base = new THREE.Color('#81898a')
+  const tipColor = new THREE.Color('#c6ccc8')
   const c = new THREE.Color()
   for (let i = 0; i < pos.count; i += 1) {
     const t = THREE.MathUtils.smoothstep(pos.getY(i), -height / 2, height / 2)
-    c.lerpColors(clear, smoke, t)
-    colors.set([c.r, c.g, c.b, THREE.MathUtils.lerp(0.12, 0.88, t)], i * 4)
+    c.lerpColors(base, tipColor, t)
+    colors.set([c.r, c.g, c.b], i * 3)
   }
-  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 4))
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
   return geometry
 }
 
-// Ryugu-style spinning top: a double cone with a sharp equatorial ridge, rounded poles, light lumps and a few craters.
-const CRATERS = [new THREE.Vector3(0.7, 0.2, 0.68), new THREE.Vector3(-0.5, -0.45, 0.72), new THREE.Vector3(-0.8, 0.3, -0.5), new THREE.Vector3(0.2, -0.5, -0.8)].map((v) => v.normalize())
-function rockRadius(d: THREE.Vector3) {
-  const equator = 1.32
-  const pole = 1.12
-  const lat = Math.sqrt(1 - d.y * d.y)
-  const cone = 1 / (Math.abs(d.y) / pole + lat / equator)
-  let r = THREE.MathUtils.lerp(cone, 1.2, 0.18) * (1 + Math.sin(d.x * 4.1 + 1.3) * Math.sin(d.z * 3.7) * 0.04 + Math.sin(d.y * 13.0 + d.z * 11.0) * 0.015)
-  CRATERS.forEach((c, i) => { r -= Math.max(0, d.dot(c) - (i === 0 ? 0.9 : 0.95)) * 2.2 })
-  return r
+// Object-space mineral variation avoids UV seams and texture downloads. The
+// metallic traces are deliberately sparse so the specimen remains mostly rock.
+type OreScanUniforms = {
+  uScans: { value: THREE.Vector4[] }
+  uScanStrength: { value: number }
 }
 
-function OreCrystal() {
+const ORE_RIPPLE_COUNT = 12
+const ORE_RIPPLE_LIFETIME = 2.5
+
+// A fine triangular surface lattice and expanding pulse follow the real
+// raycast hit, rather than being projected onto a sphere around the ore.
+function configureOreScan(shader: THREE.WebGLProgramParametersWithUniforms, uniforms: OreScanUniforms) {
+  Object.assign(shader.uniforms, uniforms)
+  shader.vertexShader = shader.vertexShader
+    .replace('#include <common>', '#include <common>\nvarying vec3 vScanWorld;\nvarying vec3 vScanLocal;\nvarying vec3 vScanNormal;')
+    .replace('#include <begin_vertex>', '#include <begin_vertex>\nvScanWorld = (modelMatrix * vec4(position, 1.0)).xyz;\nvScanLocal = position;\nvScanNormal = normal;')
+  shader.fragmentShader = shader.fragmentShader
+    .replace('#include <common>', `#include <common>
+      varying vec3 vScanWorld;
+      varying vec3 vScanLocal;
+      varying vec3 vScanNormal;
+      uniform vec4 uScans[12];
+      uniform float uScanStrength;
+      float scanGrid(vec2 p) {
+        // Smoothly warp the lattice in both directions so its cells vary in
+        // size and angle, without making the travelling ripples jitter.
+        vec2 bend = vec2(
+          sin(p.y * 0.58 + sin(p.x * 0.21)) + 0.4 * sin(p.x * 0.39 + p.y * 0.28),
+          sin(p.x * 0.49 - sin(p.y * 0.24)) + 0.4 * sin(p.y * 0.37 - p.x * 0.19)
+        );
+        p += bend * 0.28;
+        vec3 cell = abs(fract(vec3(p.x, p.y, p.x + p.y) + 0.5) - 0.5);
+        float edge = min(cell.x, min(cell.y, cell.z));
+        float width = max(fwidth(edge), 0.006);
+        return 1.0 - smoothstep(0.012, 0.012 + width, edge);
+      }`)
+    .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+      float scanArea = 0.0;
+      float pulse = 0.0;
+      for (int i = 0; i < 12; i++) {
+        float age = uScans[i].w;
+        float scanDistance = distance(vScanWorld, uScans[i].xyz);
+        float fade = smoothstep(0.0, 0.12, age) * (1.0 - smoothstep(0.25, 2.5, age));
+        float scanRadius = age * 0.62;
+        float ringDistance = (scanDistance - scanRadius) / 0.08;
+        float ring = exp(-ringDistance * ringDistance);
+        pulse = max(pulse, ring * fade);
+        float reached = 1.0 - smoothstep(scanRadius, scanRadius + 0.18, scanDistance);
+        scanArea = max(scanArea, reached * fade * (1.0 - smoothstep(0.45, 1.35, scanDistance)));
+      }
+      vec3 scanWeights = pow(abs(normalize(vScanNormal)), vec3(4.0));
+      scanWeights /= max(scanWeights.x + scanWeights.y + scanWeights.z, 0.001);
+      vec3 scanCoord = vScanLocal * 15.0;
+      float lattice = scanGrid(scanCoord.yz) * scanWeights.x
+                    + scanGrid(scanCoord.xz) * scanWeights.y
+                    + scanGrid(scanCoord.xy) * scanWeights.z;
+      totalEmissiveRadiance += vec3(0.53, 0.72, 0.86) * uScanStrength
+        * lattice * (scanArea * 0.12 + pulse * 0.72);`)
+}
+
+function configureRockMaterial(shader: THREE.WebGLProgramParametersWithUniforms, uniforms: OreScanUniforms) {
+  shader.vertexShader = shader.vertexShader
+    .replace('#include <common>', '#include <common>\nvarying vec3 vRockPosition;')
+    .replace('#include <begin_vertex>', '#include <begin_vertex>\nvRockPosition = position;')
+  shader.fragmentShader = shader.fragmentShader
+    .replace('#include <common>', `#include <common>
+      varying vec3 vRockPosition;
+      float oreHash(vec3 p) {
+        p = fract(p * 0.1031);
+        p += dot(p, p.yzx + 33.33);
+        return fract((p.x + p.y) * p.z);
+      }
+      float oreNoise(vec3 p) {
+        vec3 cell = floor(p);
+        vec3 f = fract(p);
+        f = f * f * (3.0 - 2.0 * f);
+        return mix(
+          mix(mix(oreHash(cell), oreHash(cell + vec3(1, 0, 0)), f.x),
+              mix(oreHash(cell + vec3(0, 1, 0)), oreHash(cell + vec3(1, 1, 0)), f.x), f.y),
+          mix(mix(oreHash(cell + vec3(0, 0, 1)), oreHash(cell + vec3(1, 0, 1)), f.x),
+              mix(oreHash(cell + vec3(0, 1, 1)), oreHash(cell + vec3(1, 1, 1)), f.x), f.y), f.z);
+      }`)
+    .replace('#include <color_fragment>', `#include <color_fragment>
+      float stone = oreNoise(vRockPosition * 15.0);
+      float grain = oreNoise(vRockPosition * 42.0 + 8.0);
+      float seam = abs(oreNoise(vRockPosition * 5.0 + vec3(4.0, 1.0, 7.0)) - 0.53);
+      float seamWidth = max(fwidth(seam), 0.004);
+      float mineral = (1.0 - smoothstep(0.012, 0.012 + seamWidth * 2.0, seam))
+        * smoothstep(0.52, 0.74, stone);
+      float flecks = smoothstep(0.73, 0.86, grain) * smoothstep(0.5, 0.68, stone) * 0.35;
+      float metalTrace = clamp(mineral * 0.6 + flecks, 0.0, 0.65);
+      diffuseColor.rgb *= mix(0.67, 1.3, stone) * mix(0.83, 1.15, grain);
+      diffuseColor.rgb = mix(diffuseColor.rgb, vec3(0.30, 0.32, 0.31), metalTrace);`)
+    .replace('#include <roughnessmap_fragment>', `#include <roughnessmap_fragment>
+      roughnessFactor = mix(roughnessFactor, 0.36, metalTrace);`)
+    .replace('#include <metalnessmap_fragment>', `#include <metalnessmap_fragment>
+      metalnessFactor = mix(metalnessFactor, 0.82, metalTrace);`)
+  configureOreScan(shader, uniforms)
+}
+
+// Continuous deterministic noise keeps the surface connected as it rotates and
+// also lets the existing crystals follow the newly irregular rock silhouette.
+function rockNoise(x: number, y: number, z: number) {
+  const ix = Math.floor(x), iy = Math.floor(y), iz = Math.floor(z)
+  const smooth = (v: number) => v * v * (3 - 2 * v)
+  const fx = smooth(x - ix), fy = smooth(y - iy), fz = smooth(z - iz)
+  const hash = (a: number, b: number, c: number) => {
+    const value = Math.sin(a * 127.1 + b * 311.7 + c * 74.7) * 43758.5453
+    return value - Math.floor(value)
+  }
+  const layer = (k: number) => THREE.MathUtils.lerp(
+    THREE.MathUtils.lerp(hash(ix, iy, k), hash(ix + 1, iy, k), fx),
+    THREE.MathUtils.lerp(hash(ix, iy + 1, k), hash(ix + 1, iy + 1, k), fx), fy,
+  )
+  return THREE.MathUtils.lerp(layer(iz), layer(iz + 1), fz) * 2 - 1
+}
+
+// Several scales of erosion and narrow fracture channels break up the rounded
+// asteroid into an asymmetrical, single piece of exposed volcanic rock.
+function rockRadius(d: THREE.Vector3) {
+  const broad = rockNoise(d.x * 2.3 + 4, d.y * 2.3 - 2, d.z * 2.3 + 7)
+  const medium = rockNoise(d.x * 5.2 - 3, d.y * 5.2 + 6, d.z * 5.2)
+  const fine = rockNoise(d.x * 12 + 8, d.y * 12, d.z * 12 - 5)
+  const fractureA = Math.abs(d.x * 0.68 + d.y * 0.48 + d.z * 0.55 + medium * 0.07 - 0.24)
+  const fractureB = Math.abs(d.x * -0.43 + d.y * 0.82 + d.z * 0.37 + broad * 0.09 + 0.27)
+  const cracks = (1 - THREE.MathUtils.smoothstep(fractureA, 0.015, 0.11)) * 0.095
+    + (1 - THREE.MathUtils.smoothstep(fractureB, 0.012, 0.075)) * 0.065
+  return 1.19 + broad * 0.29 + medium * 0.13 + fine * 0.045 - cracks
+}
+
+function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THREE.Group | null>; crystalTip: RefObject<THREE.Object3D | null>; reducedMotion: boolean }) {
   const outer = useRef<THREE.Group>(null)
-  const group = useRef<THREE.Group>(null)
+  const oreKeyLight = useRef<THREE.PointLight>(null)
+  const oreRimLight = useRef<THREE.PointLight>(null)
   const materials = useRef<THREE.Material[]>([])
-  const hover = useRef(0)
+  const rubbleMaterials = useRef<THREE.Material[]>([])
   const hit = useRef(false)
   const mouse = useRef(new THREE.Vector2(9, 9))
+  const pointerKind = useRef('mouse')
+  const scanState = useRef({ pointerRevision: 0, emittedRevision: 0, next: 0, lastEmission: -1, lastMotion: -1 })
   // Drag-to-rotate: accumulated user spin plus a velocity that decays for a little inertia after release.
   const drag = useRef({ active: false, x: 0, y: 0 })
   const spin = useRef(new THREE.Vector2())
   const spinVelocity = useRef(new THREE.Vector2())
   const raycaster = useMemo(() => new THREE.Raycaster(), [])
+  const scanOrigins = useMemo(() => Array.from({ length: ORE_RIPPLE_COUNT }, () => new THREE.Vector3()), [])
+  const scanTimes = useMemo(() => new Float64Array(ORE_RIPPLE_COUNT).fill(-1000), [])
+  const scanTarget = useMemo(() => new THREE.Vector3(), [])
+  const scanSmoothed = useMemo(() => new THREE.Vector3(), [])
+  const scanWorld = useMemo(() => new THREE.Vector3(), [])
+  const scanUniforms = useMemo<OreScanUniforms>(() => ({
+    uScans: { value: Array.from({ length: ORE_RIPPLE_COUNT }, () => new THREE.Vector4(0, 0, 0, 10)) },
+    uScanStrength: { value: 0 },
+  }), [])
+  const rockShader = useMemo(() => (shader: THREE.WebGLProgramParametersWithUniforms) => configureRockMaterial(shader, scanUniforms), [scanUniforms])
+  const crystalShader = useMemo(() => (shader: THREE.WebGLProgramParametersWithUniforms) => configureOreScan(shader, scanUniforms), [scanUniforms])
   const { size, gl } = useThree()
   const mobile = size.width < 720
   const envMap = useMemo(() => {
@@ -459,7 +610,7 @@ function OreCrystal() {
     return texture
   }, [gl])
   const scene = useMemo(() => {
-    const rock = new THREE.IcosahedronGeometry(1, 5)
+    const rock = new THREE.IcosahedronGeometry(1, 18)
     const pos = rock.attributes.position
     const v = new THREE.Vector3()
     for (let i = 0; i < pos.count; i += 1) {
@@ -480,31 +631,26 @@ function OreCrystal() {
       const radius = vein ? (i === 0 ? 0.3 : 0.13 + (i % 3) * 0.05) : 0.06 + (i % 3) * 0.03
       return {
         geometry: crystalGeometry(radius, height),
+        height,
         position: dir.clone().multiplyScalar(rockRadius(dir) * 0.9 + height * 0.36),
         quaternion: new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir),
-        tint: new THREE.Color().setHSL(0.07 + (i % 3) * 0.015, 0.12, 0.9 - (i % 4) * 0.05),
+        tint: new THREE.Color().setHSL(0.10, 0.025, 0.78 - (i % 4) * 0.04),
       }
     })
     const rubble = Array.from({ length: 7 }, (_, i) => ({
       position: new THREE.Vector3(Math.cos(i * 0.9) * (1.9 + (i % 3) * 0.25), Math.sin(i * 1.9) * 0.9, Math.sin(i * 0.9) * 1.6),
       scale: 0.07 + (i % 3) * 0.05,
     }))
-    const grid = new THREE.WireframeGeometry(new THREE.SphereGeometry(1.5, 18, 12))
-    // Ryugu is strewn with boulders, with one oversized block near the south pole.
-    const boulders = Array.from({ length: 36 }, (_, i) => {
-      const y = i === 0 ? -0.96 : 1 - (i / 35) * 2
-      const dir = new THREE.Vector3(Math.cos(i * 2.39996) * Math.sqrt(1 - y * y), y, Math.sin(i * 2.39996) * Math.sqrt(1 - y * y)).normalize()
-      const scale = i === 0 ? 0.24 : 0.035 + ((i * 5) % 7) * 0.012
-      return { position: dir.clone().multiplyScalar(rockRadius(dir) + scale * 0.3), scale, rotation: [i, i * 1.3, i * 0.7] as [number, number, number] }
-    })
-    return { rock, crystals, rubble, boulders, grid }
+    return { rock, crystals, rubble }
   }, [])
-  const gridMaterial = useMemo(() => new THREE.LineBasicMaterial({ color: '#b9d6df', transparent: true, opacity: 0, depthWrite: false }), [])
 
   useEffect(() => {
     // The canvas ignores pointer events (content sits above it), so track the cursor and drags on the window.
     const move = (e: PointerEvent) => {
       mouse.current.set((e.clientX / window.innerWidth) * 2 - 1, -(e.clientY / window.innerHeight) * 2 + 1)
+      pointerKind.current = e.pointerType
+      scanState.current.pointerRevision += 1
+      scanState.current.lastMotion = performance.now() / 1000
       if (!drag.current.active) return
       const dx = (e.clientX - drag.current.x) * 0.008
       const dy = (e.clientY - drag.current.y) * 0.008
@@ -542,17 +688,16 @@ function OreCrystal() {
       document.body.style.cursor = ''
       envMap.dispose()
       scene.rock.dispose()
-      scene.grid.dispose()
       scene.crystals.forEach((c) => c.geometry.dispose())
-      gridMaterial.dispose()
     }
-  }, [envMap, scene, gridMaterial])
+  }, [envMap, scene])
 
-  useFrame(({ clock, camera }) => {
+  useFrame(({ clock, camera }, delta) => {
     const phase = chapterPhase()
     const p = Math.min(phase / 2, 1)
     const visible = THREE.MathUtils.smoothstep(phase, 1.38, 1.68) * (1 - THREE.MathUtils.smoothstep(phase, 2.58, 2.96))
     const t = clock.getElapsedTime()
+    const now = performance.now() / 1000
     if (group.current && outer.current) {
       if (!drag.current.active) {
         spin.current.add(spinVelocity.current)
@@ -561,41 +706,80 @@ function OreCrystal() {
       spin.current.x = THREE.MathUtils.clamp(spin.current.x, -1.2, 1.2)
       group.current.rotation.y = t * 0.12 + p * Math.PI * 1.5 + spin.current.y
       group.current.rotation.x = 0.12 + Math.sin(t * 0.3) * 0.06 + (p - 0.8) * 0.4 + spin.current.x
+      const revealDrift = reducedMotion ? 0 : THREE.MathUtils.smoothstep(phase, 1.25, 1.5) * (1 - THREE.MathUtils.smoothstep(phase, 1.65, 2))
+      outer.current.position.x = (mobile ? 1.25 : 2.75) - revealDrift * 0.35
       outer.current.position.y = -0.38 + Math.sin(t * 0.6) * 0.08 + (0.8 - p) * 0.9
       outer.current.scale.setScalar((mobile ? 0.744 : 1.14) * (0.7 + visible * 0.3))
       raycaster.setFromCamera(mouse.current, camera)
       const wasHit = hit.current
-      hit.current = visible > 0.5 && raycaster.intersectObject(group.current, true).length > 0
+      const intersections = phase >= 1.9 && visible > 0.5 ? raycaster.intersectObject(group.current, true) : []
+      hit.current = intersections.length > 0
+      const scan = scanState.current
+      if (hit.current) {
+        group.current.updateWorldMatrix(true, false)
+        scanTarget.copy(intersections[0].point)
+        group.current.worldToLocal(scanTarget)
+        // Avoid a jump when the pointer first lands; then damp its path in 3D.
+        if (!wasHit) scanSmoothed.copy(scanTarget)
+        else scanSmoothed.lerp(scanTarget, 1 - Math.exp(-Math.min(delta, 0.1) * 16))
+      }
+      if (hit.current && !reducedMotion && pointerKind.current !== 'touch'
+        && scan.pointerRevision !== scan.emittedRevision && now - scan.lastMotion < 0.3 && now - scan.lastEmission >= 0.2) {
+        // Never reuse an active ripple: if the pool is full, wait for one to
+        // finish instead of cutting a travelling wave short.
+        for (let offset = 0; offset < scanOrigins.length; offset += 1) {
+          const slot = (scan.next + offset) % scanOrigins.length
+          if (now - scanTimes[slot] < ORE_RIPPLE_LIFETIME) continue
+          scanOrigins[slot].copy(scanSmoothed)
+          scanTimes[slot] = now
+          scan.next = (slot + 1) % scanOrigins.length
+          scan.lastEmission = now
+          scan.emittedRevision = scan.pointerRevision
+          break
+        }
+      }
+      // Keep older ripple origins attached to the rotating object while they fade.
+      for (let i = 0; i < scanOrigins.length; i += 1) {
+        const age = Math.min(10, Math.max(0, now - scanTimes[i]))
+        scanWorld.copy(scanOrigins[i])
+        if (age < ORE_RIPPLE_LIFETIME) group.current.localToWorld(scanWorld)
+        scanUniforms.uScans.value[i].set(scanWorld.x, scanWorld.y, scanWorld.z, age)
+      }
       if (hit.current !== wasHit && !drag.current.active) document.body.style.cursor = hit.current ? 'grab' : ''
-      hover.current = THREE.MathUtils.lerp(hover.current, hit.current || drag.current.active ? 1 : 0, 0.08)
     }
     materials.current.forEach((material) => {
       material.opacity = visible
       material.visible = visible > 0.001
     })
-    gridMaterial.opacity = hover.current * visible * 0.22
+    // Small fragments can fill the frame from the close-up camera. Introduce
+    // them only as the specimen pulls back into its inspectable final view.
+    rubbleMaterials.current.forEach((material) => {
+      material.opacity = visible * THREE.MathUtils.smoothstep(phase, 1.75, 1.98)
+    })
+    // Fade in the rear light only with the specimen; retain the original key
+    // light elsewhere so this pass does not change the other chapters.
+    if (oreKeyLight.current) oreKeyLight.current.intensity = THREE.MathUtils.lerp(7, 4.8, visible)
+    if (oreRimLight.current) oreRimLight.current.intensity = 16 * visible
+    scanUniforms.uScanStrength.value = reducedMotion || pointerKind.current === 'touch' ? 0 : visible
   })
 
   const keep = (material: THREE.Material | null) => { if (material && !materials.current.includes(material)) materials.current.push(material) }
   return <group ref={outer} position={[mobile ? 1.25 : 2.75, -0.38, -0.35]}>
     <group ref={group}>
       <mesh geometry={scene.rock}>
-        <meshStandardMaterial ref={keep} color="#2e3133" envMap={envMap} envMapIntensity={0.35} roughness={0.92} metalness={0.25} flatShading transparent opacity={0} />
+        <meshStandardMaterial ref={keep} color="#262827" envMap={envMap} envMapIntensity={0.35} roughness={0.94} metalness={0.08} onBeforeCompile={rockShader} flatShading transparent opacity={0} />
       </mesh>
       {scene.crystals.map((c, index) => <mesh key={index} geometry={c.geometry} position={c.position} quaternion={c.quaternion}>
-        <meshPhysicalMaterial ref={keep} color={c.tint} vertexColors envMap={envMap} envMapIntensity={1.6} metalness={0.05} roughness={0.08} ior={1.54} specularIntensity={1} clearcoat={1} clearcoatRoughness={0.04} iridescence={0.25} iridescenceIOR={1.4} iridescenceThicknessRange={[180, 620]} flatShading side={THREE.DoubleSide} depthWrite={false} transparent opacity={0} />
-      </mesh>)}
-      {scene.boulders.map((b, index) => <mesh key={`b${index}`} position={b.position} scale={b.scale} rotation={b.rotation}>
-        <dodecahedronGeometry args={[1, 0]} />
-        <meshStandardMaterial ref={keep} color="#34383a" roughness={0.95} metalness={0.2} flatShading transparent opacity={0} />
+        <meshPhysicalMaterial ref={keep} color={c.tint} vertexColors envMap={envMap} envMapIntensity={1.1} metalness={0.88} roughness={0.2} clearcoat={0.3} clearcoatRoughness={0.15} onBeforeCompile={crystalShader} flatShading depthWrite={false} transparent opacity={0} />
+        {index === 0 && <object3D ref={crystalTip} position={[0, c.height / 2, 0]} />}
       </mesh>)}
       {scene.rubble.map((r, index) => <mesh key={index} position={r.position} scale={r.scale} rotation={[index, index * 2, 0]}>
         <dodecahedronGeometry args={[1, 0]} />
-        <meshStandardMaterial ref={keep} color="#4a4f52" roughness={0.9} metalness={0.3} flatShading transparent opacity={0} />
+        <meshStandardMaterial ref={(material) => { keep(material); if (material) rubbleMaterials.current[index] = material }} color="#4a4f52" roughness={0.9} metalness={0.3} flatShading transparent opacity={0} />
       </mesh>)}
-      <lineSegments geometry={scene.grid} material={gridMaterial} raycast={() => null} />
     </group>
-    <pointLight position={[1.4, 2.4, 2.2]} intensity={7} color="#eef4ff" distance={7} />
+    <pointLight ref={oreKeyLight} position={[1.4, 2.4, 2.2]} intensity={7} color="#eef4ff" distance={7} />
+    <pointLight ref={oreRimLight} position={[-1.7, 1.1, -1.7]} intensity={0} color="#b7d8f2" distance={5.5} decay={2} />
   </group>
 }
 
@@ -681,6 +865,8 @@ function RenderOnScroll({ enabled }: { enabled: boolean }) {
 
 function SignalCanvas({ reducedMotion, documentVisible }: { reducedMotion: boolean; documentVisible: boolean }) {
   const neuralGroup = useRef<THREE.Group>(null)
+  const oreGroup = useRef<THREE.Group>(null)
+  const crystalTip = useRef<THREE.Object3D>(null)
   return (
     <Canvas
       dpr={[1, window.innerWidth < 720 ? 1.5 : 2]}
@@ -697,8 +883,8 @@ function SignalCanvas({ reducedMotion, documentVisible }: { reducedMotion: boole
       <DigitalRain reducedMotion={reducedMotion} />
       <CosmicParticles />
       <NeuralNetwork group={neuralGroup} />
-      <OreCrystal />
-      <CameraDirector reducedMotion={reducedMotion} neuralGroup={neuralGroup} />
+      <OreCrystal group={oreGroup} crystalTip={crystalTip} reducedMotion={reducedMotion} />
+      <CameraDirector reducedMotion={reducedMotion} neuralGroup={neuralGroup} oreGroup={oreGroup} crystalTip={crystalTip} />
       <RenderOnScroll enabled={reducedMotion && documentVisible} />
     </Canvas>
   )
