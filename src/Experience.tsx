@@ -776,6 +776,7 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
       const wasHit = hit.current
       const intersections = phase >= 1.9 && visible > 0.5 ? raycaster.intersectObject(group.current, true) : []
       hit.current = intersections.length > 0
+      if (hit.current && !wasHit && pointerKind.current !== 'touch') window.dispatchEvent(new Event('ore-crystal-hover'))
       const scan = scanState.current
       if (hit.current) {
         group.current.updateWorldMatrix(true, false)
@@ -1030,7 +1031,34 @@ function SoundToggle() {
     const update = () => sound.current?.update(chapterPhase())
     const music = window.setInterval(() => sound.current?.note(chapterPhase()), 1700)
     const ambience = window.setInterval(update, 250)
-    const ripple = () => sound.current?.cue('ripple')
+    const crystal = () => sound.current?.cue('crystal')
+    const motionPreference = window.matchMedia('(prefers-reduced-motion: reduce)')
+    let lastPointer: { x: number; y: number; time: number } | null = null
+    let lastNetworkMotion = 0
+    const networkMove = (event: PointerEvent) => {
+      if (event.pointerType === 'touch' || motionPreference.matches || document.hidden) return
+      const now = performance.now()
+      const phase = chapterPhase()
+      if (lastPointer && phase >= 0.75 && phase <= 1.45) {
+        const distance = Math.hypot(event.clientX - lastPointer.x, event.clientY - lastPointer.y)
+        const elapsed = now - lastPointer.time
+        if (distance > 0 && elapsed < 250) {
+          sound.current?.networkMovement(Math.min(1, 0.2 + distance / Math.max(8, elapsed) * 0.6))
+          lastNetworkMotion = now
+        }
+      }
+      lastPointer = { x: event.clientX, y: event.clientY, time: now }
+    }
+    const stopNetwork = () => {
+      lastPointer = null
+      lastNetworkMotion = 0
+      sound.current?.networkMovement(0)
+    }
+    const networkIdle = window.setInterval(() => {
+      const phase = chapterPhase()
+      if (lastNetworkMotion && (performance.now() - lastNetworkMotion > 220 || phase < 0.75 || phase > 1.45 || motionPreference.matches)) stopNetwork()
+    }, 100)
+    const pointerLeave = (event: PointerEvent) => { if (!event.relatedTarget) stopNetwork() }
     const thresholds = [0.55, 1.52, 2.55]
     const armed = thresholds.map(() => true)
     let previousPhase = chapterPhase()
@@ -1063,18 +1091,27 @@ function SoundToggle() {
     const visibility = () => {
       const current = sound.current
       if (!current) return
-      if (document.hidden) void current.suspend()
+      if (document.hidden) { stopNetwork(); void current.suspend() }
       else void current.resume().catch(() => setError(true))
     }
     update()
-    window.addEventListener('ore-ripple', ripple)
+    window.addEventListener('ore-ripple', crystal)
+    window.addEventListener('ore-crystal-hover', crystal)
+    window.addEventListener('pointermove', networkMove, { passive: true })
+    window.addEventListener('pointerout', pointerLeave)
+    window.addEventListener('blur', stopNetwork)
     window.addEventListener('scroll', transition, { passive: true })
     document.addEventListener('click', click)
     document.addEventListener('visibilitychange', visibility)
     return () => {
       window.clearInterval(music)
       window.clearInterval(ambience)
-      window.removeEventListener('ore-ripple', ripple)
+      window.clearInterval(networkIdle)
+      window.removeEventListener('ore-ripple', crystal)
+      window.removeEventListener('ore-crystal-hover', crystal)
+      window.removeEventListener('pointermove', networkMove)
+      window.removeEventListener('pointerout', pointerLeave)
+      window.removeEventListener('blur', stopNetwork)
       window.removeEventListener('scroll', transition)
       document.removeEventListener('click', click)
       document.removeEventListener('visibilitychange', visibility)
@@ -1136,7 +1173,7 @@ export function Experience() {
 
       <section id="mind" className="chapter mind" aria-label="Chapter two: Mind">
         <p>Mind</p>
-        <div><h2>Applied knowledge<br />is <em>Value.</em></h2><span className="mind-caption">360 nodes / live pathway field</span></div>
+        <div><h2>When applied<br />it becomes <em>Value</em></h2><span className="mind-caption">Connecting the right dots</span></div>
       </section>
       <PotentialChapter id="potential" />
       <SignalChapter id="loop" hidden />
@@ -1163,7 +1200,7 @@ function PotentialChapter({ id, hidden = false }: { id: string; hidden?: boolean
   return (
       <section id={id} className="chapter potential" aria-label={hidden ? undefined : 'Chapter three: Potential'} aria-hidden={hidden || undefined} inert={hidden || undefined}>
         <p>Potential</p>
-        <div className="potential-copy"><h2>Learn how to<br /><em>create value</em></h2><p className="ore-note">A rare material. A limitless becoming.</p><a className="cta" href="https://claude-expert.pages.dev/">Learn how to do this <span>↗</span></a></div>
+        <div className="potential-copy"><h2><em>Crystalize</em></h2><p className="ore-note">People are paying $500 for websites like this</p><a className="cta" href="https://claude-expert.pages.dev/">Learn how to do this <span>↗</span></a></div>
       </section>
   )
 }

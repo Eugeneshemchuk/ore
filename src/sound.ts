@@ -4,10 +4,12 @@ export class Soundscape {
   private readonly master = this.context.createGain()
   private readonly drone = this.context.createGain()
   private readonly texture = this.context.createGain()
+  private readonly networkMotion = this.context.createGain()
+  private readonly networkAir = this.context.createGain()
   private readonly voices: OscillatorNode[] = []
   private readonly noise: AudioBufferSourceNode
   private step = 0
-  private lastRipple = 0
+  private lastRipple = -Infinity
 
   constructor() {
     const compressor = this.context.createDynamicsCompressor()
@@ -41,6 +43,19 @@ export class Soundscape {
     filter.frequency.value = 380
     this.texture.gain.value = 0.002
     this.noise.connect(filter).connect(this.texture).connect(this.master)
+    // A quiet low-frequency field that follows movement through the network.
+    const networkOscillator = this.context.createOscillator()
+    networkOscillator.type = 'sine'
+    networkOscillator.frequency.value = 52
+    this.networkMotion.gain.value = 0
+    networkOscillator.connect(this.networkMotion).connect(this.master)
+    networkOscillator.start()
+    this.voices.push(networkOscillator)
+    const networkFilter = this.context.createBiquadFilter()
+    networkFilter.type = 'lowpass'
+    networkFilter.frequency.value = 150
+    this.networkAir.gain.value = 0
+    this.noise.connect(networkFilter).connect(this.networkAir).connect(this.master)
     this.noise.start()
   }
 
@@ -68,12 +83,23 @@ export class Soundscape {
     this.step += 1
   }
 
-  cue(kind: 'navigation' | 'ripple') {
+  networkMovement(intensity: number) {
+    const level = Math.max(0, Math.min(1, intensity))
     const now = this.context.currentTime
-    if (kind === 'ripple') {
-      if (now - this.lastRipple < 0.8) return
+    this.networkMotion.gain.setTargetAtTime(level * 0.014, now, level ? 0.12 : 0.4)
+    this.networkAir.gain.setTargetAtTime(level * 0.009, now, level ? 0.12 : 0.4)
+  }
+
+  cue(kind: 'navigation' | 'crystal') {
+    const now = this.context.currentTime
+    if (kind === 'crystal') {
+      if (now - this.lastRipple < 0.65) return
       this.lastRipple = now
-      this.tone(620 + Math.random() * 90, 0.004, 0.65)
+      // Inharmonic, staggered partials suggest tiny crystals forming, not a UI beep.
+      const root = 760 + Math.random() * 130
+      this.tone(root, 0.004, 1.15)
+      this.tone(root * 1.51, 0.0025, 0.85, 0.07)
+      this.tone(root * 2.17, 0.0015, 0.65, 0.15)
     } else {
       this.tone(440, 0.009, 0.8)
       this.tone(660, 0.004, 1.1)
@@ -88,25 +114,40 @@ export class Soundscape {
     const envelope = this.context.createGain()
     source.buffer = this.noise.buffer
     filter.type = 'bandpass'
-    filter.Q.value = 0.8
-    const middle = [900, 560, 720][scene]
-    filter.frequency.setValueAtTime(forward ? middle * 0.45 : middle * 1.7, now)
-    filter.frequency.exponentialRampToValueAtTime(forward ? middle * 1.7 : middle * 0.45, now + 1.3)
+    // Signal → Mind: airy electronic sweep. Mind → Potential: low, mineral
+    // descent. Potential → Signal: brighter, shorter dispersal.
+    const profiles = [
+      { from: 360, to: 1900, duration: 1.45, peak: 0.018, q: 1.5 },
+      { from: 1150, to: 120, duration: 2.0, peak: 0.023, q: 0.65 },
+      { from: 2300, to: 700, duration: 0.95, peak: 0.014, q: 2.2 },
+    ]
+    const profile = profiles[scene]
+    filter.Q.value = profile.q
+    filter.frequency.setValueAtTime(forward ? profile.from : profile.to, now)
+    filter.frequency.exponentialRampToValueAtTime(forward ? profile.to : profile.from, now + profile.duration)
     envelope.gain.setValueAtTime(0.0001, now)
-    envelope.gain.exponentialRampToValueAtTime(0.025, now + 0.3)
-    envelope.gain.exponentialRampToValueAtTime(0.0001, now + 1.55)
+    envelope.gain.exponentialRampToValueAtTime(profile.peak, now + profile.duration * 0.25)
+    envelope.gain.exponentialRampToValueAtTime(0.0001, now + profile.duration + 0.2)
     source.connect(filter).connect(envelope).connect(this.master)
     source.start(now)
-    source.stop(now + 1.6)
+    source.stop(now + profile.duration + 0.25)
     source.onended = () => { source.disconnect(); filter.disconnect(); envelope.disconnect() }
 
-    // A low, soft harmonic gives each handoff a sense of weight.
-    this.tone([164.81, 110, 146.83][scene], 0.008, 1.8)
+    if (scene === 0) {
+      this.tone(246.94, 0.006, 1.5)
+      this.tone(369.99, 0.004, 1.2, 0.22)
+    } else if (scene === 1) {
+      this.tone(82.41, 0.012, 2.3)
+      this.tone(164.81, 0.004, 1.7, 0.15)
+    } else {
+      this.tone(523.25, 0.004, 1.1)
+      this.tone(783.99, 0.0025, 0.8, 0.12)
+    }
   }
 
-  private tone(frequency: number, volume: number, duration: number) {
+  private tone(frequency: number, volume: number, duration: number, delay = 0) {
     if (this.context.state !== 'running') return
-    const now = this.context.currentTime
+    const now = this.context.currentTime + delay
     const oscillator = this.context.createOscillator()
     const envelope = this.context.createGain()
     oscillator.type = 'sine'
