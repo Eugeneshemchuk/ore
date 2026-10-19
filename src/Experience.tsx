@@ -2,6 +2,7 @@ import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { useMemo, useRef, useState, useEffect, type RefObject } from 'react'
 import * as THREE from 'three'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
+import { Soundscape } from './sound'
 
 // Alien runes plus half-width katakana (mirrored at draw time, as in the film) for the digital rain atlas.
 const RUNES = [...'ᚫϟ⊹ᛟ⌁⋔ᚢϞ⊙ᚨ⌇⟐ᛉ∴']
@@ -796,6 +797,7 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
           scan.next = (slot + 1) % scanOrigins.length
           scan.lastEmission = now
           scan.emittedRevision = scan.pointerRevision
+          window.dispatchEvent(new Event('ore-ripple'))
           break
         }
       }
@@ -1016,6 +1018,101 @@ function useRenderPreferences() {
   return { reducedMotion, documentVisible }
 }
 
+function SoundToggle() {
+  const sound = useRef<Soundscape | null>(null)
+  const [enabled, setEnabled] = useState(false)
+  const [starting, setStarting] = useState(false)
+  const [error, setError] = useState(false)
+
+  useEffect(() => () => { void sound.current?.close(); sound.current = null }, [])
+  useEffect(() => {
+    if (!enabled) return
+    const update = () => sound.current?.update(chapterPhase())
+    const music = window.setInterval(() => sound.current?.note(chapterPhase()), 1700)
+    const ambience = window.setInterval(update, 250)
+    const ripple = () => sound.current?.cue('ripple')
+    const thresholds = [0.55, 1.52, 2.55]
+    const armed = thresholds.map(() => true)
+    let previousPhase = chapterPhase()
+    let lastTransition = 0
+    const transition = () => {
+      const phase = chapterPhase()
+      let delta = phase - previousPhase
+      // The loop seam goes from 3 back to 0, not across the whole timeline.
+      if (delta > 1.5) delta -= 3
+      if (delta < -1.5) delta += 3
+      const next = previousPhase + delta
+      thresholds.forEach((threshold, index) => {
+        const distance = Math.abs(phase - threshold)
+        if (Math.min(distance, 3 - distance) > 0.12) armed[index] = true
+        const crossed = [-3, 0, 3].some((offset) => {
+          const boundary = threshold + offset
+          return delta > 0 ? previousPhase < boundary && next >= boundary : previousPhase > boundary && next <= boundary
+        })
+        if (crossed && armed[index] && !document.hidden && performance.now() - lastTransition > 900) {
+          sound.current?.transition(index, delta > 0)
+          lastTransition = performance.now()
+          armed[index] = false
+        }
+      })
+      previousPhase = phase
+    }
+    const click = (event: MouseEvent) => {
+      if (event.target instanceof Element && event.target.closest('header a, .cta')) sound.current?.cue('navigation')
+    }
+    const visibility = () => {
+      const current = sound.current
+      if (!current) return
+      if (document.hidden) void current.suspend()
+      else void current.resume().catch(() => setError(true))
+    }
+    update()
+    window.addEventListener('ore-ripple', ripple)
+    window.addEventListener('scroll', transition, { passive: true })
+    document.addEventListener('click', click)
+    document.addEventListener('visibilitychange', visibility)
+    return () => {
+      window.clearInterval(music)
+      window.clearInterval(ambience)
+      window.removeEventListener('ore-ripple', ripple)
+      window.removeEventListener('scroll', transition)
+      document.removeEventListener('click', click)
+      document.removeEventListener('visibilitychange', visibility)
+    }
+  }, [enabled])
+
+  const toggle = async () => {
+    setError(false)
+    if (enabled) {
+      const current = sound.current
+      sound.current = null
+      setEnabled(false)
+      if (current) await current.close()
+      return
+    }
+    setStarting(true)
+    let current: Soundscape | null = null
+    try {
+      current = new Soundscape()
+      await current.start()
+      sound.current = current
+      setEnabled(true)
+    } catch {
+      if (current) void current.close()
+      setError(true)
+    } finally {
+      setStarting(false)
+    }
+  }
+
+  return <div className="sound-control">
+    <button type="button" className="sound-toggle" aria-pressed={enabled} aria-label={enabled ? 'Turn sound off' : 'Turn sound on'} disabled={starting} onClick={() => void toggle()}>
+      <span className="sound-indicator" aria-hidden="true" /> Sound {enabled ? 'on' : 'off'}
+    </button>
+    {error && <span className="sound-error" role="status">Sound unavailable</span>}
+  </div>
+}
+
 export function Experience() {
   useScrollProgress()
   const { reducedMotion, documentVisible } = useRenderPreferences()
@@ -1024,11 +1121,14 @@ export function Experience() {
       <div className="webgl-shell" aria-hidden="true"><SignalCanvas reducedMotion={reducedMotion} documentVisible={documentVisible} /></div>
       <header className="chrome">
         <a className="brand" href="#signal" aria-label="Claude Expert home">claude<span>.expert</span></a>
-        <nav aria-label="Chapters">
-          <a className="is-active" href="#signal">Signal</a>
-          <a href="#mind">Mind</a>
-          <a href="#potential">Potential</a>
-        </nav>
+        <div className="chrome-controls">
+          <nav aria-label="Chapters">
+            <a className="is-active" href="#signal">Signal</a>
+            <a href="#mind">Mind</a>
+            <a href="#potential">Potential</a>
+          </nav>
+          <SoundToggle />
+        </div>
       </header>
 
       <PotentialChapter id="lead" hidden />
