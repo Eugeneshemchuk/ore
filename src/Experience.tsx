@@ -707,18 +707,18 @@ function crystalGeometry(radius: number, height: number) {
   const points = [new THREE.Vector2(0, -height / 2), new THREE.Vector2(radius * 0.86, -height / 2), new THREE.Vector2(radius, height / 2 - tip), new THREE.Vector2(0, height / 2)]
   const geometry = new THREE.LatheGeometry(points, 6).toNonIndexed()
   geometry.computeVertexNormals()
-  // Small tonal variations keep the existing facets from looking uniformly white.
+  // Smoky quartz: a lighter translucent root and a darker, glassy termination.
   const pos = geometry.attributes.position
-  const colors = new Float32Array(pos.count * 3)
-  const base = new THREE.Color('#81898a')
-  const tipColor = new THREE.Color('#c6ccc8')
+  const colors = new Float32Array(pos.count * 4)
+  const base = new THREE.Color('#9b8e7c')
+  const tipColor = new THREE.Color('#20211f')
   const c = new THREE.Color()
   for (let i = 0; i < pos.count; i += 1) {
     const t = THREE.MathUtils.smoothstep(pos.getY(i), -height / 2, height / 2)
-    c.lerpColors(base, tipColor, t)
-    colors.set([c.r, c.g, c.b], i * 3)
+    c.lerpColors(base, tipColor, Math.pow(t, 0.8))
+    colors.set([c.r, c.g, c.b, THREE.MathUtils.lerp(0.58, 0.9, t)], i * 4)
   }
-  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+  geometry.setAttribute('color', new THREE.BufferAttribute(colors, 4))
   return geometry
 }
 
@@ -856,6 +856,7 @@ function rockRadius(d: THREE.Vector3) {
 function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THREE.Group | null>; crystalTip: RefObject<THREE.Object3D | null>; reducedMotion: boolean }) {
   const outer = useRef<THREE.Group>(null)
   const glint = useRef<THREE.Sprite>(null)
+  const crystalHalos = useRef<THREE.SpriteMaterial[]>([])
   const oreKeyLight = useRef<THREE.PointLight>(null)
   const oreRimLight = useRef<THREE.PointLight>(null)
   const materials = useRef<THREE.Material[]>([])
@@ -879,9 +880,31 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
     uScanStrength: { value: 0 },
   }), [])
   const rockShader = useMemo(() => (shader: THREE.WebGLProgramParametersWithUniforms) => configureRockMaterial(shader, scanUniforms), [scanUniforms])
-  const crystalShader = useMemo(() => (shader: THREE.WebGLProgramParametersWithUniforms) => configureOreScan(shader, scanUniforms), [scanUniforms])
+  const crystalShader = useMemo(() => (shader: THREE.WebGLProgramParametersWithUniforms) => {
+    configureOreScan(shader, scanUniforms)
+    shader.fragmentShader = shader.fragmentShader.replace('#include <color_fragment>', `#include <color_fragment>
+      // Subtle cloudy inclusions, anchored to the mineral as it rotates.
+      float smoke = sin(vScanLocal.y * 11.0 + sin(vScanLocal.x * 18.0 + vScanLocal.z * 13.0) * 1.8);
+      smoke *= sin(vScanLocal.y * 6.0 - vScanLocal.z * 20.0);
+      diffuseColor.rgb *= 0.88 + 0.12 * smoke;
+    `)
+  }, [scanUniforms])
   const { size, gl } = useThree()
   const mobile = size.width < 720
+  const haloTexture = useMemo(() => {
+    const canvas = document.createElement('canvas')
+    canvas.width = canvas.height = 128
+    const context = canvas.getContext('2d')!
+    const gradient = context.createRadialGradient(64, 64, 0, 64, 64, 64)
+    gradient.addColorStop(0, 'rgba(195, 204, 211, 0.35)')
+    gradient.addColorStop(0.22, 'rgba(173, 183, 193, 0.12)')
+    gradient.addColorStop(1, 'rgba(173, 183, 193, 0)')
+    context.fillStyle = gradient
+    context.fillRect(0, 0, 128, 128)
+    const texture = new THREE.CanvasTexture(canvas)
+    texture.colorSpace = THREE.SRGBColorSpace
+    return texture
+  }, [])
   const glintTexture = useMemo(() => {
     const canvas = document.createElement('canvas')
     // Draw at higher resolution so the fine ray edges survive a close-up.
@@ -935,9 +958,10 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
       return {
         geometry: crystalGeometry(radius, height),
         height,
+        radius,
         position: dir.clone().multiplyScalar(rockRadius(dir) * 0.9 + height * 0.36),
         quaternion: new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir),
-        tint: new THREE.Color().setHSL(0.10, 0.025, 0.78 - (i % 4) * 0.04),
+        tint: new THREE.Color().setHSL(0.09, 0.04, 0.94 - (i % 4) * 0.025),
       }
     })
     const rubble = Array.from({ length: 7 }, (_, i) => ({
@@ -991,10 +1015,11 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
       document.body.style.cursor = ''
       envMap.dispose()
       glintTexture.dispose()
+      haloTexture.dispose()
       scene.rock.dispose()
       scene.crystals.forEach((c) => c.geometry.dispose())
     }
-  }, [envMap, glintTexture, scene])
+  }, [envMap, glintTexture, haloTexture, scene])
 
   useFrame(({ clock, camera }, delta) => {
     const phase = chapterPhase()
@@ -1067,6 +1092,7 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
       material.opacity = visible
       material.visible = visible > 0.001
     })
+    crystalHalos.current.forEach((material) => { material.opacity = visible * 0.24 })
     // Small fragments can fill the frame from the close-up camera. Introduce
     // them only as the specimen pulls back into its inspectable final view.
     rubbleMaterials.current.forEach((material) => {
@@ -1086,7 +1112,10 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
         <meshStandardMaterial ref={keep} color="#262827" envMap={envMap} envMapIntensity={0.35} roughness={0.94} metalness={0.08} onBeforeCompile={rockShader} flatShading transparent opacity={0} />
       </mesh>
       {scene.crystals.map((c, index) => <mesh key={index} geometry={c.geometry} position={c.position} quaternion={c.quaternion}>
-        <meshPhysicalMaterial ref={keep} color={c.tint} vertexColors envMap={envMap} envMapIntensity={1.1} metalness={0.88} roughness={0.2} clearcoat={0.3} clearcoatRoughness={0.15} onBeforeCompile={crystalShader} flatShading depthWrite={false} transparent opacity={0} />
+        <meshPhysicalMaterial ref={keep} color={c.tint} vertexColors envMap={envMap} envMapIntensity={1.4} metalness={0.08} roughness={0.12} ior={1.54} clearcoat={0.65} clearcoatRoughness={0.08} onBeforeCompile={crystalShader} flatShading depthWrite={false} transparent opacity={0} />
+        {index < 3 && <sprite position={[0, c.height * 0.24, 0]} scale={[c.radius * 4, c.height * 0.9, 1]} raycast={() => null}>
+          <spriteMaterial ref={(material) => { if (material) crystalHalos.current[index] = material }} map={haloTexture} transparent opacity={0} depthWrite={false} blending={THREE.AdditiveBlending} />
+        </sprite>}
         {index === 0 && <object3D ref={crystalTip} position={[0, c.height / 2, 0]}>
           <sprite ref={glint} raycast={() => null} visible={false}>
             <spriteMaterial map={glintTexture} transparent opacity={0} depthWrite={false} depthTest={false} blending={THREE.AdditiveBlending} toneMapped={false} />
@@ -1469,7 +1498,7 @@ function PotentialChapter({ id, hidden = false }: { id: string; hidden?: boolean
   return (
       <section id={id} className="chapter potential" aria-label={hidden ? undefined : 'Chapter three: Potential'} aria-hidden={hidden || undefined} inert={hidden || undefined}>
         <p>Potential</p>
-        <div className="potential-copy"><RainHeadline lines={['Crystalize']} /><p className="ore-note">Learn how to make websites like this</p><a className="cta" href="https://claude-expert.pages.dev/">become claude.expert <span>↗</span></a></div>
+        <div className="potential-copy"><RainHeadline lines={['Crystalize']} /><p className="ore-note">Learn how to make websites like this</p><a className="cta" href="https://claude-expert.pages.dev/"><span className="cta-sweep" aria-hidden="true" /><span className="cta-glyphs" aria-hidden="true">ᚫ ⊹ ᛟ ⌁</span><span className="cta-label">become claude.expert</span><span className="cta-arrow" aria-hidden="true">↗</span></a></div>
       </section>
   )
 }
