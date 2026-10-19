@@ -732,10 +732,14 @@ function CameraDirector({ reducedMotion, neuralGroup, oreGroup, crystalTip, moti
       }
       const pointer = motion.current.pointer
       const parallax = motion.current.active ? 1 : 0
-      targetPosition.current.x += pointer.x * 0.36 * parallax * (1 - closeUp)
-      targetPosition.current.y += (pointer.y * 0.24 * parallax + Math.sin(phase * Math.PI * 2 / 3) * 0.25) * (1 - closeUp)
-      targetLook.current.x += pointer.x * 0.16 * parallax * (1 - closeUp)
-      targetLook.current.y += pointer.y * 0.1 * parallax * (1 - closeUp)
+      // In Potential, move the viewpoint around the specimen while keeping the
+      // camera aimed near it. Different position/look offsets create depth
+      // instead of simply sliding the entire composition across the screen.
+      const oreParallax = THREE.MathUtils.smoothstep(phase, 1.75, 2.05) * (1 - returnToSignal)
+      targetPosition.current.x += pointer.x * THREE.MathUtils.lerp(0.36, 1.05, oreParallax) * parallax * (1 - closeUp)
+      targetPosition.current.y += (pointer.y * THREE.MathUtils.lerp(0.24, 0.7, oreParallax) * parallax + Math.sin(phase * Math.PI * 2 / 3) * 0.25) * (1 - closeUp)
+      targetLook.current.x += pointer.x * THREE.MathUtils.lerp(0.16, 0.12, oreParallax) * parallax * (1 - closeUp)
+      targetLook.current.y += pointer.y * THREE.MathUtils.lerp(0.1, 0.08, oreParallax) * parallax * (1 - closeUp)
       targetPosition.current.z += Math.sin(clock.getElapsedTime() * 0.45) * 0.13 * (1 - closeUp)
     }
     // Keep the camera's easing consistent at different frame rates.
