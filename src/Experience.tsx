@@ -1,5 +1,5 @@
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { useMemo, useRef, useState, useEffect } from 'react'
+import { useMemo, useRef, useState, useEffect, type RefObject } from 'react'
 import * as THREE from 'three'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 
@@ -11,20 +11,56 @@ const RAIN_CELL_PX = window.innerWidth < 720 ? 15 : 19
 
 // Scene progress 0..1 across the three chapters, rewinding to 0 while the looped copy of chapter one scrolls in.
 // The page repeats every loop period, so positions in the lead-in copy of chapter three map onto the real one.
-function loopProgress() {
+function chapterPhase() {
   const start = document.getElementById('signal')?.offsetTop ?? 0
-  const end = (document.getElementById('potential')?.offsetTop ?? 0) - start
+  const mind = (document.getElementById('mind')?.offsetTop ?? 0) - start
+  const potential = (document.getElementById('potential')?.offsetTop ?? 0) - start
   const period = Math.max(1, (document.getElementById('loop')?.offsetTop ?? 0) - start)
   const y = (((window.scrollY - start) % period) + period) % period
-  if (y <= end) return y / Math.max(1, end)
-  return 1 - Math.min(1, (y - end) / Math.max(1, period - end))
+  if (y < mind) return y / Math.max(1, mind)
+  if (y < potential) return 1 + (y - mind) / Math.max(1, potential - mind)
+  return 2 + (y - potential) / Math.max(1, period - potential)
+}
+
+function loopProgress() {
+  const phase = chapterPhase()
+  return phase <= 2 ? phase / 2 : 3 - phase
+}
+
+// The same bridge runs backwards at the loop seam, connecting signal directly to crystal.
+function signalDeparture(phase: number) {
+  return phase < 1 ? phase : phase > 2 ? 3 - phase : 1
 }
 
 const rainVertexShader = /* glsl */ `
+  uniform vec2 uCells;
+  uniform float uFocusTime;
   varying vec2 vUv;
+  varying vec2 vFocus;
+  float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
   void main() {
     vUv = uv;
-    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+    // Find a real, visible drop head near the centre. Compute this only at the
+    // plane's vertices, using the exact same hash and timing as the rain shader.
+    float best = 1000.0;
+    vFocus = vec2(0.6, 0.5);
+    for (int i = -12; i <= 12; i++) {
+      float column = floor(uCells.x * 0.6) + float(i);
+      for (int j = 0; j < 2; j++) {
+        float salt = float(j) * 41.0;
+        float speed = 7.0 + hash(vec2(column, salt)) * 13.0;
+        float trail = 8.0 + hash(vec2(column, salt + 7.0)) * 22.0;
+        float period = uCells.y + trail + hash(vec2(column, salt + 3.0)) * uCells.y;
+        float head = floor(mod(uFocusTime * speed + hash(vec2(column, salt + 1.0)) * period, period));
+        vec2 candidate = vec2((column + 0.5) / uCells.x, 1.0 - (head + 0.5) / uCells.y);
+        float distanceToCenter = length((candidate - vec2(0.6, 0.5)) * vec2(1.0, 1.2));
+        if (candidate.x > 0.1 && candidate.x < 0.9 && candidate.y > 0.15 && candidate.y < 0.85 && distanceToCenter < best) {
+          best = distanceToCenter;
+          vFocus = candidate;
+        }
+      }
+    }
+    gl_Position = vec4(position.xy, 0.0, 1.0);
   }
 `
 
@@ -36,8 +72,12 @@ const rainFragmentShader = /* glsl */ `
   uniform vec2 uCells;
   uniform float uTime;
   uniform float uOpacity;
+  uniform float uZoom;
+  uniform float uPixelation;
+  uniform float uDissolve;
   uniform vec2 uPointer;
   varying vec2 vUv;
+  varying vec2 vFocus;
 
   float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 
@@ -52,7 +92,8 @@ const rainFragmentShader = /* glsl */ `
   }
 
   void main() {
-    vec2 grid = vUv * uCells;
+    vec2 rainUv = (vUv - vFocus) / uZoom + vFocus;
+    vec2 grid = rainUv * uCells;
     vec2 cell = floor(grid);
     vec2 local = fract(grid);
     float row = uCells.y - 1.0 - cell.y;
@@ -68,19 +109,29 @@ const rainFragmentShader = /* glsl */ `
     float rate = mix(9.0, 1.2, clamp(t, 0.0, 1.0)) * (0.4 + hash(cell));
     float glyph = floor(hash(cell + floor(uTime * rate) * 0.137) * uGlyphCount);
     vec2 atlasCell = vec2(mod(glyph, uAtlasGrid.x), floor(glyph / uAtlasGrid.x));
-    vec2 atlasUv = (atlasCell + vec2(local.x, 1.0 - local.y)) / uAtlasGrid;
-    vec2 gradient = vUv * uCells / uAtlasGrid;
+    vec2 pixelLocal = (floor(local * 24.0) + 0.5) / 24.0;
+    vec2 sampledLocal = mix(local, pixelLocal, uPixelation);
+    vec2 atlasUv = (atlasCell + vec2(sampledLocal.x, 1.0 - sampledLocal.y)) / uAtlasGrid;
+    vec2 gradient = rainUv * uCells / uAtlasGrid;
     float ink = textureGrad(uAtlas, vec2(atlasUv.x, 1.0 - atlasUv.y), dFdx(gradient), dFdy(gradient)).a;
 
     float leader = t >= 0.0 ? step(t, 0.02) : 0.0;
     float tail = t >= 0.0 ? pow(1.0 - t, 1.6) : 0.0;
-    vec3 green = vec3(0.12, 1.0, 0.42);
-    vec3 color = green * tail * 0.85 + vec3(0.78, 1.0, 0.86) * leader * 1.4 + green * near * 0.35;
-    float glow = exp(-dot(local - 0.5, local - 0.5) * 9.0) * leader * 0.18;
+    vec3 orange = vec3(1.0, 0.24, 0.025);
+    vec3 color = orange * tail * 0.85 + vec3(1.0, 0.68, 0.34) * leader * 1.4 + orange * near * 0.35;
+    float glow = exp(-dot(local - 0.5, local - 0.5) * 9.0) * leader * 0.18 * (1.0 - uPixelation);
+    vec2 pixelEdge = abs(fract(local * 24.0) - 0.5);
+    float block = 1.0 - smoothstep(0.4, 0.5, max(pixelEdge.x, pixelEdge.y));
+    ink *= mix(1.0, block, uPixelation);
+    // Let the enlarged pixels dissolve at slightly different moments, instead
+    // of cutting the entire glyph away as the network appears behind it.
+    float pixelSeed = hash(cell * 31.0 + floor(local * 24.0));
+    float dissolve = smoothstep(uDissolve - 0.16, uDissolve + 0.16, pixelSeed);
+    ink *= mix(1.0, dissolve, smoothstep(0.0, 0.15, uDissolve));
     // Thin the rain behind the headline so the copy stays legible.
     vec2 screen = (vUv - 0.5) * 1.2 + 0.5;
     float copy = smoothstep(0.62, 0.42, screen.x) * smoothstep(0.22, 0.38, screen.y) * smoothstep(0.78, 0.62, screen.y);
-    gl_FragColor = vec4(color * ink + green * glow, 1.0) * uOpacity * (1.0 - copy * 0.6);
+    gl_FragColor = vec4(color * ink + orange * glow, 1.0) * uOpacity * (1.0 - copy * 0.6);
   }
 `
 
@@ -152,53 +203,83 @@ function glyphAtlas() {
   return { texture, grid: new THREE.Vector2(ATLAS_COLUMNS, rows), count: glyphs.length }
 }
 
-function DigitalRain() {
+function DigitalRain({ reducedMotion }: { reducedMotion: boolean }) {
   const material = useRef<THREE.ShaderMaterial>(null)
   const pointer = useRef(new THREE.Vector2(9, 9))
-  const { camera, size, pointer: cursor, viewport } = useThree()
+  const cursorTarget = useRef(new THREE.Vector2())
+  const focusTime = useRef<number | null>(null)
+  const { size, pointer: cursor } = useThree()
   const atlas = useMemo(glyphAtlas, [])
-  const depth = -1.5
-  // Oversize the plane so the camera's drift never reveals an edge.
-  const { width, height } = viewport.getCurrentViewport(camera, new THREE.Vector3(0, 0, depth))
-  const plane = { width: width * 1.2, height: height * 1.2 }
-  const columns = Math.round((size.width * 1.2) / RAIN_CELL_PX)
-  const cells = new THREE.Vector2(columns, Math.round(columns * (plane.height / plane.width) / 1.3))
+  const columns = Math.max(1, Math.round(size.width / RAIN_CELL_PX))
+  const cells = useMemo(() => new THREE.Vector2(columns, Math.max(1, Math.round(columns * size.height / size.width / 1.3))), [columns, size.width, size.height])
   const uniforms = useMemo(() => ({
     uAtlas: { value: atlas.texture },
     uAtlasGrid: { value: atlas.grid },
     uGlyphCount: { value: atlas.count },
     uCells: { value: new THREE.Vector2() },
     uTime: { value: 0 },
+    uFocusTime: { value: 0 },
     uOpacity: { value: 1 },
+    uZoom: { value: 1 },
+    uPixelation: { value: 0 },
+    uDissolve: { value: 0 },
     uPointer: { value: new THREE.Vector2(9, 9) },
   }), [atlas])
   useEffect(() => () => atlas.texture.dispose(), [atlas])
 
   useFrame(({ clock }) => {
     if (!material.current) return
-    const visible = 1 - THREE.MathUtils.smoothstep(loopProgress(), 0.08, 0.45)
-    pointer.current.lerp(new THREE.Vector2(cursor.x / 2.4 + 0.5, cursor.y / 2.4 + 0.5), 0.08)
+    const departure = signalDeparture(chapterPhase())
+    const visible = 1 - THREE.MathUtils.smoothstep(departure, reducedMotion ? 0.35 : 0.68, reducedMotion ? 0.65 : 0.97)
+    const time = clock.getElapsedTime()
+    // Lock only the location chosen at the start of the move; the rain itself
+    // keeps evolving, even if that area becomes empty while we zoom through it.
+    if (!reducedMotion && departure > 0.04 && departure < 0.98) {
+      if (focusTime.current === null) focusTime.current = time
+    } else {
+      focusTime.current = null
+    }
+    pointer.current.lerp(cursorTarget.current.set(cursor.x / 2 + 0.5, cursor.y / 2 + 0.5), 0.08)
     // The material holds its own copy of the uniforms, so write through it rather than the memoized object.
     const live = material.current.uniforms
-    live.uTime.value = clock.getElapsedTime()
+    live.uTime.value = time
+    live.uFocusTime.value = focusTime.current ?? time
     live.uOpacity.value = visible * 0.82
+    live.uZoom.value = reducedMotion ? 1 : 1 + Math.pow(THREE.MathUtils.smoothstep(departure, 0.04, 0.94), 2) * 120
+    live.uPixelation.value = reducedMotion ? 0 : THREE.MathUtils.smoothstep(departure, 0.42, 0.72)
+    live.uDissolve.value = reducedMotion ? 0 : THREE.MathUtils.smoothstep(departure, 0.55, 0.97)
     live.uCells.value.copy(cells)
     live.uPointer.value.copy(pointer.current)
     material.current.visible = visible > 0.001
   })
 
-  return <mesh position={[0, 0, depth]} renderOrder={-1} frustumCulled={false}>
-    <planeGeometry args={[plane.width, plane.height]} />
-    <shaderMaterial ref={material} transparent depthWrite={false} blending={THREE.AdditiveBlending} uniforms={uniforms} vertexShader={rainVertexShader} fragmentShader={rainFragmentShader} />
+  return <mesh renderOrder={100} frustumCulled={false}>
+    <planeGeometry args={[2, 2]} />
+    <shaderMaterial ref={material} transparent depthTest={false} depthWrite={false} blending={THREE.AdditiveBlending} uniforms={uniforms} vertexShader={rainVertexShader} fragmentShader={rainFragmentShader} />
   </mesh>
 }
 
-function NeuralNetwork({ progress }: { progress: number }) {
-  const group = useRef<THREE.Group>(null)
+const NEURON_ANCHOR = new THREE.Vector3(0, 0, 0.9)
+
+function NeuralNetwork({ group }: { group: RefObject<THREE.Group | null> }) {
   const nodeMaterial = useRef<THREE.PointsMaterial>(null)
   const lineMaterial = useRef<THREE.LineBasicMaterial>(null)
+  const nodeTexture = useMemo(() => {
+    const canvas = document.createElement('canvas')
+    canvas.width = canvas.height = 64
+    const ctx = canvas.getContext('2d')!
+    const glow = ctx.createRadialGradient(32, 32, 1, 32, 32, 32)
+    glow.addColorStop(0, 'rgba(255,255,255,1)')
+    glow.addColorStop(0.22, 'rgba(255,255,255,0.95)')
+    glow.addColorStop(0.55, 'rgba(255,255,255,0.25)')
+    glow.addColorStop(1, 'rgba(255,255,255,0)')
+    ctx.fillStyle = glow
+    ctx.fillRect(0, 0, 64, 64)
+    return new THREE.CanvasTexture(canvas)
+  }, [])
+  useEffect(() => () => nodeTexture.dispose(), [nodeTexture])
   const { nodes, links } = useMemo(() => {
-    const positions: THREE.Vector3[] = []
+    const positions: THREE.Vector3[] = [NEURON_ANCHOR.clone()]
     const seed = (index: number) => {
       const angle = index * 2.3999632297
       const radius = Math.sqrt(index / 146) * 2.8
@@ -208,7 +289,7 @@ function NeuralNetwork({ progress }: { progress: number }) {
         (Math.random() - 0.5) * 2.5,
       )
     }
-    for (let i = 0; i < 360; i += 1) positions.push(seed(i))
+    for (let i = 0; i < 359; i += 1) positions.push(seed(i))
     const linkData: number[] = []
     positions.forEach((from, i) => {
       const candidates = positions
@@ -218,6 +299,7 @@ function NeuralNetwork({ progress }: { progress: number }) {
         .slice(0, 3)
       candidates.forEach(({ j }) => linkData.push(from.x, from.y, from.z, positions[j].x, positions[j].y, positions[j].z))
     })
+    // The camera target is an ordinary node, sharing the same material and size.
     const nodeGeometry = new THREE.BufferGeometry().setFromPoints(positions)
     const linkGeometry = new THREE.BufferGeometry()
     linkGeometry.setAttribute('position', new THREE.Float32BufferAttribute(linkData, 3))
@@ -225,8 +307,8 @@ function NeuralNetwork({ progress }: { progress: number }) {
   }, [])
 
   useFrame(({ clock }) => {
-    const pageProgress = loopProgress()
-    const visible = THREE.MathUtils.smoothstep(pageProgress, 0.23, 0.38) * (1 - THREE.MathUtils.smoothstep(pageProgress, 0.69, 0.84))
+    const phase = chapterPhase()
+    const visible = THREE.MathUtils.smoothstep(phase, 0.42, 0.78) * (1 - THREE.MathUtils.smoothstep(phase, 1.38, 1.7))
     if (group.current) {
       group.current.rotation.y = clock.getElapsedTime() * 0.06
       group.current.rotation.x = Math.sin(clock.getElapsedTime() * 0.11) * 0.12
@@ -244,7 +326,7 @@ function NeuralNetwork({ progress }: { progress: number }) {
       <lineBasicMaterial ref={lineMaterial} color="#d9e3e5" transparent opacity={0} depthWrite={false} />
     </lineSegments>
     <points geometry={nodes}>
-      <pointsMaterial ref={nodeMaterial} color="#f06e4e" transparent opacity={0} size={0.065} sizeAttenuation depthWrite={false} blending={THREE.AdditiveBlending} />
+      <pointsMaterial ref={nodeMaterial} map={nodeTexture} color="#f06e4e" transparent opacity={0} size={0.065} sizeAttenuation depthWrite={false} blending={THREE.AdditiveBlending} />
     </points>
   </group>
 }
@@ -277,22 +359,47 @@ function CosmicParticles() {
   </points>
 }
 
-function CameraDirector() {
+function CameraDirector({ reducedMotion, neuralGroup }: { reducedMotion: boolean; neuralGroup: RefObject<THREE.Group | null> }) {
   const { camera, pointer } = useThree()
   const currentLook = useRef(new THREE.Vector3())
   const targetPosition = useRef(new THREE.Vector3())
   const targetLook = useRef(new THREE.Vector3())
+  const mindPosition = useMemo(() => new THREE.Vector3(1.1, 0.08, 4.15), [])
+  const orePosition = useMemo(() => new THREE.Vector3(-0.42, 0.08, 5.7), [])
+  const signalPosition = useMemo(() => new THREE.Vector3(0, 0, 6.3), [])
+  const signalLook = useMemo(() => new THREE.Vector3(0, 0, 0), [])
+  const mindLook = useMemo(() => new THREE.Vector3(2.05, 0, -0.65), [])
+  const oreLook = useMemo(() => new THREE.Vector3(1.45, 0.45, 0), [])
+  const anchorWorld = useMemo(() => new THREE.Vector3(), [])
+  const closePosition = useMemo(() => new THREE.Vector3(), [])
+  const closeOffset = useMemo(() => new THREE.Vector3(0.025, 0.015, 0.32), [])
   useFrame(({ clock }) => {
-    const p = loopProgress()
-    const transitionOne = THREE.MathUtils.smoothstep(p, 0.22, 0.46)
-    const transitionTwo = THREE.MathUtils.smoothstep(p, 0.57, 0.82)
-    targetPosition.current.set(0, 0, 6.3).lerp(new THREE.Vector3(1.1, 0.08, 4.15), transitionOne).lerp(new THREE.Vector3(-0.42, 0.08, 5.7), transitionTwo)
-    targetPosition.current.x += pointer.x * 0.22
-    targetPosition.current.y += pointer.y * 0.14
-    targetPosition.current.z += Math.sin(clock.getElapsedTime() * 0.45) * 0.13
-    targetLook.current.set(0, 0, 0).lerp(new THREE.Vector3(2.05, 0, -0.65), transitionOne).lerp(new THREE.Vector3(1.45, 0, 0), transitionTwo)
-    camera.position.lerp(targetPosition.current, 0.035)
-    currentLook.current.lerp(targetLook.current, 0.035)
+    const phase = chapterPhase()
+    const transitionOne = THREE.MathUtils.smoothstep(phase, 0.35, 0.95)
+    const transitionTwo = THREE.MathUtils.smoothstep(phase, 1.2, 1.7)
+    const returnToSignal = THREE.MathUtils.smoothstep(phase, 2.55, 3)
+    targetPosition.current.copy(signalPosition).lerp(mindPosition, transitionOne).lerp(orePosition, transitionTwo).lerp(signalPosition, returnToSignal)
+    targetLook.current.copy(signalLook).lerp(mindLook, transitionOne).lerp(oreLook, transitionTwo).lerp(signalLook, returnToSignal)
+    if (!reducedMotion) {
+      const bridge = signalDeparture(phase)
+      const push = Math.sin(Math.PI * THREE.MathUtils.smoothstep(bridge, 0.1, 1))
+      if (phase > 2) targetPosition.current.z -= push * 1.5
+      let closeUp = 0
+      if (phase < 1 && neuralGroup.current) {
+        neuralGroup.current.updateWorldMatrix(true, false)
+        anchorWorld.copy(NEURON_ANCHOR)
+        neuralGroup.current.localToWorld(anchorWorld)
+        closePosition.copy(anchorWorld).add(closeOffset)
+        closeUp = THREE.MathUtils.smoothstep(phase, 0.32, 0.57) * (1 - THREE.MathUtils.smoothstep(phase, 0.67, 1.0))
+        targetPosition.current.lerp(closePosition, closeUp)
+        targetLook.current.lerp(anchorWorld, closeUp)
+      }
+      targetPosition.current.x += pointer.x * 0.22 * (1 - closeUp)
+      targetPosition.current.y += pointer.y * 0.14 * (1 - closeUp)
+      targetPosition.current.z += Math.sin(clock.getElapsedTime() * 0.45) * 0.13 * (1 - closeUp)
+    }
+    camera.position.lerp(targetPosition.current, reducedMotion ? 1 : 0.1)
+    currentLook.current.lerp(targetLook.current, reducedMotion ? 1 : 0.1)
     camera.lookAt(currentLook.current)
   })
   return null
@@ -442,8 +549,9 @@ function OreCrystal() {
   }, [envMap, scene, gridMaterial])
 
   useFrame(({ clock, camera }) => {
-    const p = loopProgress()
-    const visible = THREE.MathUtils.smoothstep(p, 0.69, 0.84)
+    const phase = chapterPhase()
+    const p = Math.min(phase / 2, 1)
+    const visible = THREE.MathUtils.smoothstep(phase, 1.38, 1.68) * (1 - THREE.MathUtils.smoothstep(phase, 2.58, 2.96))
     const t = clock.getElapsedTime()
     if (group.current && outer.current) {
       if (!drag.current.active) {
@@ -555,11 +663,28 @@ function RawOre({ progress }: { progress: number }) {
   </group>
 }
 
-function SignalCanvas({ progress, paused }: { progress: number; paused: boolean }) {
+function RenderOnScroll({ enabled }: { enabled: boolean }) {
+  const invalidate = useThree((state) => state.invalidate)
+  useEffect(() => {
+    if (!enabled) return
+    const update = () => invalidate()
+    window.addEventListener('scroll', update, { passive: true })
+    window.addEventListener('resize', update)
+    invalidate()
+    return () => {
+      window.removeEventListener('scroll', update)
+      window.removeEventListener('resize', update)
+    }
+  }, [enabled, invalidate])
+  return null
+}
+
+function SignalCanvas({ reducedMotion, documentVisible }: { reducedMotion: boolean; documentVisible: boolean }) {
+  const neuralGroup = useRef<THREE.Group>(null)
   return (
     <Canvas
       dpr={[1, window.innerWidth < 720 ? 1.5 : 2]}
-      frameloop={paused ? 'never' : 'always'}
+      frameloop={!documentVisible ? 'never' : reducedMotion ? 'demand' : 'always'}
       camera={{ position: [0, 0, 6.3], fov: 44 }}
       gl={{ antialias: false, powerPreference: 'high-performance', toneMapping: THREE.ACESFilmicToneMapping }}
       fallback={<div className="canvas-fallback">Knowledge begins as signal.</div>}
@@ -569,11 +694,12 @@ function SignalCanvas({ progress, paused }: { progress: number; paused: boolean 
       <ambientLight intensity={0.25} color="#b7c5ca" />
       <pointLight position={[3, 2, 4]} intensity={14} color="#f06e4e" distance={10} />
       <pointLight position={[-4, -2, 2]} intensity={8} color="#b9d6df" distance={10} />
-      <DigitalRain />
+      <DigitalRain reducedMotion={reducedMotion} />
       <CosmicParticles />
-      <NeuralNetwork progress={progress} />
+      <NeuralNetwork group={neuralGroup} />
       <OreCrystal />
-      <CameraDirector />
+      <CameraDirector reducedMotion={reducedMotion} neuralGroup={neuralGroup} />
+      <RenderOnScroll enabled={reducedMotion && documentVisible} />
     </Canvas>
   )
 }
@@ -638,11 +764,11 @@ function useRenderPreferences() {
 }
 
 export function Experience() {
-  const progress = useScrollProgress()
+  useScrollProgress()
   const { reducedMotion, documentVisible } = useRenderPreferences()
   return (
     <main>
-      <div className="webgl-shell" aria-hidden="true"><SignalCanvas progress={progress} paused={reducedMotion || !documentVisible} /></div>
+      <div className="webgl-shell" aria-hidden="true"><SignalCanvas reducedMotion={reducedMotion} documentVisible={documentVisible} /></div>
       <header className="chrome">
         <a className="brand" href="#signal" aria-label="Claude Expert home">claude<span>.expert</span></a>
         <nav aria-label="Chapters">
