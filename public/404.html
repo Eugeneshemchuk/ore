@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Page not found · claude.expert</title>
+    <script>
+      // Some sharing apps encode the fragment as a path. Recover only the
+      // known opening link; unrelated missing pages should remain a 404.
+      if (/^\/ore\/%23signal\/?$/i.test(window.location.pathname)) {
+        window.location.replace('/ore/' + window.location.search)
+      }
+    </script>
+    <style>
+      body { background: #080909; color: #e6e2dc; font: 16px system-ui, sans-serif; margin: 0; padding: 12vh 8vw; }
+      a { color: #ef8c4b; }
+    </style>
+  </head>
+  <body>
+    <h1>Page not found</h1>
+    <p><a href="/ore/">Return to the experience</a></p>
+  </body>
+</html>

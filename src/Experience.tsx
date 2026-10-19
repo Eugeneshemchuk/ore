@@ -1399,7 +1399,7 @@ function useScrollProgress() {
     if ('scrollRestoration' in history) history.scrollRestoration = 'manual'
     // Always begin at the opening, even if the browser restored a later
     // chapter or the page was reloaded with a chapter hash in its URL.
-    history.replaceState(history.state, '', `${location.pathname}${location.search}#signal`)
+    history.replaceState(history.state, '', `${location.pathname}${location.search}`)
     window.scrollTo({ top: seams().start, behavior: 'instant' })
     visualPhase = 0
     update()
