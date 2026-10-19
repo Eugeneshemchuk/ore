@@ -105,7 +105,7 @@ export class Soundscape {
 
   private async loadNeuralSample() {
     try {
-      const response = await fetch(`${import.meta.env.BASE_URL}audio/neural-trance.mp3`)
+      const response = await fetch(`${import.meta.env.BASE_URL}audio/neural-space.mp3`)
       if (!response.ok) throw new Error('Neural audio unavailable')
       const buffer = await this.context.decodeAudioData(await response.arrayBuffer())
       if (this.context.state === 'closed') return

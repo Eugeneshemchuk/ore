@@ -456,12 +456,15 @@ function NeuralNetwork({ group, oreGroup, repulsion, reducedMotion }: { group: R
 
   useFrame(({ clock }) => {
     const phase = chapterPhase()
-    const fold = reducedMotion ? 0 : THREE.MathUtils.smoothstep(phase, 1.16, 1.55)
-    const visible = THREE.MathUtils.smoothstep(phase, 0.36, 0.82) * (1 - THREE.MathUtils.smoothstep(phase, 1.55, 1.79))
+    const fold = reducedMotion ? 0 : THREE.MathUtils.smoothstep(phase, 1.16, 1.62)
+    const arrival = THREE.MathUtils.smoothstep(phase, 0.36, 0.82)
+    const nodeVisibility = arrival * (1 - THREE.MathUtils.smoothstep(phase, 1.43, 1.86))
+    const lineVisibility = arrival * (1 - THREE.MathUtils.smoothstep(phase, 1.36, 1.78))
     if (group.current) {
-      group.current.rotation.y = clock.getElapsedTime() * 0.06
-      group.current.rotation.x = Math.sin(clock.getElapsedTime() * 0.11) * 0.12
-      group.current.scale.setScalar(0.8 + visible * 0.3)
+      // Reset every Euler component before blending: the previous frame's
+      // slerp can otherwise leak its Z rotation back into the next frame.
+      group.current.rotation.set(Math.sin(clock.getElapsedTime() * 0.11) * 0.12, clock.getElapsedTime() * 0.06, 0)
+      group.current.scale.setScalar(0.8 + arrival * 0.3)
       group.current.position.set(1.55, -0.1, -0.55)
       if (oreGroup.current && fold > 0) {
         oreGroup.current.updateWorldMatrix(true, false)
@@ -485,17 +488,17 @@ function NeuralNetwork({ group, oreGroup, repulsion, reducedMotion }: { group: R
       previousFold.current = fold
     }
     if (nodeMaterial.current) {
-      nodeMaterial.current.opacity = visible
+      nodeMaterial.current.opacity = nodeVisibility
       nodeMaterial.current.size = 0.065 + Math.sin(clock.getElapsedTime() * 2.1) * 0.01
     }
-    if (lineMaterial.current) lineMaterial.current.opacity = visible * 0.55
+    if (lineMaterial.current) lineMaterial.current.opacity = lineVisibility * 0.55
   })
 
   return <group ref={group} position={[1.55, -0.1, -0.55]}>
-    <lineSegments geometry={links}>
+    <lineSegments geometry={links} frustumCulled={false}>
       <lineBasicMaterial ref={lineMaterial} color="#d9e3e5" transparent opacity={0} depthWrite={false} onBeforeCompile={repelShader} />
     </lineSegments>
-    <points geometry={nodes}>
+    <points geometry={nodes} frustumCulled={false}>
       <pointsMaterial ref={nodeMaterial} map={nodeTexture} color="#f06e4e" transparent opacity={0} size={0.065} sizeAttenuation depthWrite={false} blending={THREE.AdditiveBlending} onBeforeCompile={repelShader} />
     </points>
   </group>
@@ -1064,7 +1067,7 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
   useFrame(({ clock, camera }, delta) => {
     const phase = chapterPhase()
     const p = Math.min(phase / 2, 1)
-    const visible = THREE.MathUtils.smoothstep(phase, 1.34, 1.76) * (1 - THREE.MathUtils.smoothstep(phase, 2.53, 2.97))
+    const visible = THREE.MathUtils.smoothstep(phase, 1.38, 1.84) * (1 - THREE.MathUtils.smoothstep(phase, 2.53, 2.97))
     const t = clock.getElapsedTime()
     if (glint.current) {
       // Peak at the closest point of the crystal-tip camera move, fading in
