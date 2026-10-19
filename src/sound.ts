@@ -143,7 +143,9 @@ export class Soundscape {
     const mind = Math.max(0, 1 - Math.abs(phase - 1))
     const ore = Math.max(0, 1 - Math.abs(phase - 2))
     const fade = (x: number) => { const t = Math.max(0, Math.min(1, x)); return t * t * (3 - 2 * t) }
-    const neuralPresence = fade((phase - 0.55) / 0.35) * (1 - fade((phase - 1.3) / 0.4))
+    // Carry the space recording through Mind and Potential, fading it at either Signal transition.
+    const signalDeparture = phase <= 2 ? Math.min(phase, 1) : 3 - phase
+    const neuralPresence = fade((signalDeparture - 0.55) / 0.35)
     this.neuralSampleGain.gain.setTargetAtTime(neuralPresence * 0.3, now, 0.35)
     this.drone.gain.setTargetAtTime(0.028 + mind * 0.012 + ore * 0.006, now, 0.8)
     this.texture.gain.setTargetAtTime(0.002 + mind * 0.001 + ore * 0.0015, now, 0.8)
