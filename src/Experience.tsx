@@ -1,5 +1,5 @@
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { useMemo, useRef, useState, useEffect, type RefObject } from 'react'
+import { Component, useMemo, useRef, useState, useEffect, type CSSProperties, type ReactNode, type RefObject } from 'react'
 import * as THREE from 'three'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 import { Soundscape } from './sound'
@@ -83,10 +83,10 @@ const rainFragmentShader = /* glsl */ `
   float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
 
   // Returns distance (in rows) behind the drop's head, or -1 when this cell is outside the drop.
-  float drop(float column, float row, float salt) {
+  float drop(float column, float row, float salt, float rows) {
     float speed = 7.0 + hash(vec2(column, salt)) * 13.0;
     float trail = 8.0 + hash(vec2(column, salt + 7.0)) * 22.0;
-    float period = uCells.y + trail + hash(vec2(column, salt + 3.0)) * uCells.y;
+    float period = rows + trail + hash(vec2(column, salt + 3.0)) * rows;
     float head = floor(mod(uTime * speed + hash(vec2(column, salt + 1.0)) * period, period));
     float behind = head - row;
     return behind >= 0.0 && behind < trail ? behind / trail : -1.0;
@@ -94,13 +94,14 @@ const rainFragmentShader = /* glsl */ `
 
   void main() {
     vec2 rainUv = (vUv - vFocus) / uZoom + vFocus;
-    vec2 grid = rainUv * uCells;
+    vec2 activeCells = uCells;
+    vec2 grid = rainUv * activeCells;
     vec2 cell = floor(grid);
     vec2 local = fract(grid);
-    float row = uCells.y - 1.0 - cell.y;
+    float row = activeCells.y - 1.0 - cell.y;
 
-    float a = drop(cell.x, row, 0.0);
-    float b = drop(cell.x, row, 41.0);
+    float a = drop(cell.x, row, 0.0, activeCells.y);
+    float b = drop(cell.x, row, 41.0, activeCells.y);
     float t = a < 0.0 ? b : (b < 0.0 ? a : min(a, b));
 
     float near = smoothstep(0.22, 0.0, length((vUv - uPointer) * vec2(uCells.x / uCells.y, 1.0)));
@@ -113,7 +114,7 @@ const rainFragmentShader = /* glsl */ `
     vec2 pixelLocal = (floor(local * 24.0) + 0.5) / 24.0;
     vec2 sampledLocal = mix(local, pixelLocal, uPixelation);
     vec2 atlasUv = (atlasCell + vec2(sampledLocal.x, 1.0 - sampledLocal.y)) / uAtlasGrid;
-    vec2 gradient = rainUv * uCells / uAtlasGrid;
+    vec2 gradient = rainUv * activeCells / uAtlasGrid;
     float ink = textureGrad(uAtlas, vec2(atlasUv.x, 1.0 - atlasUv.y), dFdx(gradient), dFdy(gradient)).a;
 
     float leader = t >= 0.0 ? step(t, 0.02) : 0.0;
@@ -129,10 +130,7 @@ const rainFragmentShader = /* glsl */ `
     float pixelSeed = hash(cell * 31.0 + floor(local * 24.0));
     float dissolve = smoothstep(uDissolve - 0.16, uDissolve + 0.16, pixelSeed);
     ink *= mix(1.0, dissolve, smoothstep(0.0, 0.15, uDissolve));
-    // Thin the rain behind the headline so the copy stays legible.
-    vec2 screen = (vUv - 0.5) * 1.2 + 0.5;
-    float copy = smoothstep(0.62, 0.42, screen.x) * smoothstep(0.22, 0.38, screen.y) * smoothstep(0.78, 0.62, screen.y);
-    gl_FragColor = vec4(color * ink + orange * glow, 1.0) * uOpacity * (1.0 - copy * 0.6);
+    gl_FragColor = vec4(color * ink + orange * glow, 1.0) * uOpacity;
   }
 `
 
@@ -321,9 +319,19 @@ function RepulsionController({ uniforms, reducedMotion }: { uniforms: RepulsionU
   return null
 }
 
-function NeuralNetwork({ group, repulsion }: { group: RefObject<THREE.Group | null>; repulsion: RepulsionUniforms }) {
+function NeuralNetwork({ group, oreGroup, repulsion, reducedMotion }: { group: RefObject<THREE.Group | null>; oreGroup: RefObject<THREE.Group | null>; repulsion: RepulsionUniforms; reducedMotion: boolean }) {
   const nodeMaterial = useRef<THREE.PointsMaterial>(null)
   const lineMaterial = useRef<THREE.LineBasicMaterial>(null)
+  const [addedNodes, setAddedNodes] = useState<THREE.Vector3[]>([])
+  const { camera } = useThree()
+  const raycaster = useMemo(() => new THREE.Raycaster(), [])
+  const clickPlane = useMemo(() => new THREE.Plane(), [])
+  const clickPoint = useMemo(() => new THREE.Vector3(), [])
+  const orePosition = useMemo(() => new THREE.Vector3(), [])
+  const oreScale = useMemo(() => new THREE.Vector3(), [])
+  const oreRotation = useMemo(() => new THREE.Quaternion(), [])
+  const initialRotation = useMemo(() => new THREE.Quaternion(), [])
+  const previousFold = useRef<number | null>(null)
   const repelShader = useMemo(() => (shader: THREE.WebGLProgramParametersWithUniforms) => configureRepulsion(shader, repulsion), [repulsion])
   const nodeTexture = useMemo(() => {
     const canvas = document.createElement('canvas')
@@ -339,41 +347,99 @@ function NeuralNetwork({ group, repulsion }: { group: RefObject<THREE.Group | nu
     return new THREE.CanvasTexture(canvas)
   }, [])
   useEffect(() => () => nodeTexture.dispose(), [nodeTexture])
-  const { nodes, links } = useMemo(() => {
+  const { nodes, links, original, folded, edges } = useMemo(() => {
     const positions: THREE.Vector3[] = [NEURON_ANCHOR.clone()]
     const seed = (index: number) => {
       const angle = index * 2.3999632297
       const radius = Math.sqrt(index / 146) * 2.8
       return new THREE.Vector3(
-        Math.cos(angle) * radius + (Math.random() - 0.5) * 0.35,
+        Math.cos(angle) * radius + (Math.sin(index * 91.7) * 0.5) * 0.35,
         Math.sin(angle * 1.63) * radius * 0.58,
-        (Math.random() - 0.5) * 2.5,
+        Math.sin(index * 43.31) * 1.25,
       )
     }
     for (let i = 0; i < 359; i += 1) positions.push(seed(i))
+    positions.push(...addedNodes)
     const linkData: number[] = []
+    const edgeData: number[] = []
     positions.forEach((from, i) => {
       const candidates = positions
         .map((to, j) => ({ j, d: from.distanceToSquared(to) }))
         .filter(({ j, d }) => j > i && d < 1.75)
         .sort((a, b) => a.d - b.d)
         .slice(0, 3)
-      candidates.forEach(({ j }) => linkData.push(from.x, from.y, from.z, positions[j].x, positions[j].y, positions[j].z))
+      candidates.forEach(({ j }) => { edgeData.push(i, j); linkData.push(from.x, from.y, from.z, positions[j].x, positions[j].y, positions[j].z) })
     })
+    // New nodes always connect to their nearest existing neighbours, even when clicked outside the original field.
+    for (let i = 360; i < positions.length; i += 1) {
+      positions.slice(0, i).map((to, j) => ({ j, d: positions[i].distanceToSquared(to) }))
+        .sort((a, b) => a.d - b.d).slice(0, 3).forEach(({ j }) => {
+          edgeData.push(i, j)
+          linkData.push(positions[i].x, positions[i].y, positions[i].z, positions[j].x, positions[j].y, positions[j].z)
+        })
+    }
     // The camera target is an ordinary node, sharing the same material and size.
     const nodeGeometry = new THREE.BufferGeometry().setFromPoints(positions)
     const linkGeometry = new THREE.BufferGeometry()
     linkGeometry.setAttribute('position', new THREE.Float32BufferAttribute(linkData, 3))
-    return { nodes: nodeGeometry, links: linkGeometry }
-  }, [])
+    const targets = positions.map((p, i) => {
+      const direction = p.clone().add(new THREE.Vector3(0.001, 0.002, 0.003)).normalize()
+      // Fill the irregular rock volume while keeping enough nodes near its surface to read the silhouette.
+      const depth = 0.55 + ((i * 73) % 100) / 100 * 0.45
+      return direction.multiplyScalar(rockRadius(direction) * depth)
+    })
+    return { nodes: nodeGeometry, links: linkGeometry, original: positions, folded: targets, edges: edgeData }
+  }, [addedNodes])
+
+  useEffect(() => {
+    const addNode = (event: PointerEvent) => {
+      const phase = chapterPhase()
+      if (event.button !== 0 || phase < 0.85 || phase > 1.3 || !group.current || (event.target instanceof Element && event.target.closest('a, button, input, select, textarea'))) return
+      raycaster.setFromCamera(new THREE.Vector2(event.clientX / window.innerWidth * 2 - 1, 1 - event.clientY / window.innerHeight * 2), camera)
+      group.current.getWorldPosition(clickPoint)
+      clickPlane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(new THREE.Vector3()), clickPoint)
+      const hit = raycaster.ray.intersectPlane(clickPlane, new THREE.Vector3())
+      if (!hit) return
+      group.current.worldToLocal(hit)
+      setAddedNodes(previous => [...previous.slice(-79), hit])
+    }
+    window.addEventListener('pointerdown', addNode)
+    return () => window.removeEventListener('pointerdown', addNode)
+  }, [camera, clickPlane, clickPoint, group, raycaster])
+  useEffect(() => {
+    previousFold.current = null
+    return () => { nodes.dispose(); links.dispose() }
+  }, [nodes, links])
 
   useFrame(({ clock }) => {
     const phase = chapterPhase()
-    const visible = THREE.MathUtils.smoothstep(phase, 0.42, 0.78) * (1 - THREE.MathUtils.smoothstep(phase, 1.38, 1.7))
+    const fold = reducedMotion ? 0 : THREE.MathUtils.smoothstep(phase, 1.16, 1.55)
+    const visible = THREE.MathUtils.smoothstep(phase, 0.36, 0.82) * (1 - THREE.MathUtils.smoothstep(phase, 1.55, 1.79))
     if (group.current) {
       group.current.rotation.y = clock.getElapsedTime() * 0.06
       group.current.rotation.x = Math.sin(clock.getElapsedTime() * 0.11) * 0.12
       group.current.scale.setScalar(0.8 + visible * 0.3)
+      group.current.position.set(1.55, -0.1, -0.55)
+      if (oreGroup.current && fold > 0) {
+        oreGroup.current.updateWorldMatrix(true, false)
+        oreGroup.current.matrixWorld.decompose(orePosition, oreRotation, oreScale)
+        initialRotation.copy(group.current.quaternion)
+        group.current.position.lerp(orePosition, fold)
+        group.current.quaternion.slerpQuaternions(initialRotation, oreRotation, fold)
+        group.current.scale.lerp(oreScale, fold)
+      }
+    }
+    const nodePositions = nodes.getAttribute('position') as THREE.BufferAttribute
+    const linkPositions = links.getAttribute('position') as THREE.BufferAttribute
+    if (previousFold.current !== fold) {
+      original.forEach((p, i) => {
+        const target = folded[i]
+        nodePositions.setXYZ(i, THREE.MathUtils.lerp(p.x, target.x, fold), THREE.MathUtils.lerp(p.y, target.y, fold), THREE.MathUtils.lerp(p.z, target.z, fold))
+      })
+      edges.forEach((node, i) => linkPositions.setXYZ(i, nodePositions.getX(node), nodePositions.getY(node), nodePositions.getZ(node)))
+      nodePositions.needsUpdate = true
+      linkPositions.needsUpdate = true
+      previousFold.current = fold
     }
     if (nodeMaterial.current) {
       nodeMaterial.current.opacity = visible
@@ -393,8 +459,11 @@ function NeuralNetwork({ group, repulsion }: { group: RefObject<THREE.Group | nu
 }
 
 function CosmicParticles({ repulsion }: { repulsion: RepulsionUniforms }) {
+  const mobile = useThree((state) => state.size.width < 720)
   const field = useRef<THREE.Points>(null)
   const material = useRef<THREE.PointsMaterial>(null)
+  const mindField = useRef<THREE.Points>(null)
+  const mindMaterial = useRef<THREE.PointsMaterial>(null)
   const repelShader = useMemo(() => (shader: THREE.WebGLProgramParametersWithUniforms) => configureRepulsion(shader, repulsion), [repulsion])
   const geometry = useMemo(() => {
     const positions = new Float32Array(620 * 3)
@@ -408,21 +477,162 @@ function CosmicParticles({ repulsion }: { repulsion: RepulsionUniforms }) {
     result.setAttribute('position', new THREE.BufferAttribute(positions, 3))
     return result
   }, [])
+  const mindGeometry = useMemo(() => {
+    const count = mobile ? 600 : 1875
+    const positions = new Float32Array(count * 3)
+    for (let i = 0; i < count; i += 1) {
+      positions[i * 3] = (Math.random() - 0.5) * 15
+      positions[i * 3 + 1] = (Math.random() - 0.5) * 9
+      positions[i * 3 + 2] = -2 - Math.random() * 8
+    }
+    const result = new THREE.BufferGeometry()
+    result.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    return result
+  }, [mobile])
+  useEffect(() => () => geometry.dispose(), [geometry])
+  useEffect(() => () => mindGeometry.dispose(), [mindGeometry])
   useFrame(({ clock }) => {
     const p = loopProgress()
     if (field.current) {
       field.current.rotation.y = clock.getElapsedTime() * 0.012
       field.current.rotation.z = Math.sin(clock.getElapsedTime() * 0.07) * 0.03
+      if (mindField.current) mindField.current.rotation.copy(field.current.rotation)
     }
-    if (material.current) material.current.opacity = 0.14 + THREE.MathUtils.smoothstep(p, 0.52, 0.88) * 0.42
+    const phase = chapterPhase()
+    const networkMask = 1 - THREE.MathUtils.smoothstep(phase, 0.55, 0.9) * (1 - THREE.MathUtils.smoothstep(phase, 1.35, 1.8))
+    if (material.current) material.current.opacity = (0.14 + THREE.MathUtils.smoothstep(p, 0.52, 0.88) * 0.42) * networkMask
+    if (mindMaterial.current) mindMaterial.current.opacity = 0.42 * THREE.MathUtils.smoothstep(phase, 0.55, 0.9) * (1 - THREE.MathUtils.smoothstep(phase, 1.35, 1.8))
   })
-  return <points ref={field} geometry={geometry}>
-    <pointsMaterial ref={material} color="#d7e2e2" size={0.024} sizeAttenuation transparent opacity={0.14} depthWrite={false} onBeforeCompile={repelShader} />
+  return <>
+    <points ref={field} geometry={geometry}>
+      <pointsMaterial ref={material} color="#d7e2e2" size={0.024} sizeAttenuation transparent opacity={0.14} depthWrite={false} onBeforeCompile={repelShader} />
+    </points>
+    <points ref={mindField} geometry={mindGeometry}>
+      <pointsMaterial ref={mindMaterial} color="#d7e2e2" size={0.03} sizeAttenuation transparent opacity={0} depthWrite={false} onBeforeCompile={repelShader} />
+    </points>
+  </>
+}
+
+type SwarmMotion = { pointer: THREE.Vector2; active: boolean; energy: number; swirl: number }
+
+// A separate, lightweight field complements the existing repelling network:
+// these particles drift toward the cursor while the network keeps its effect.
+function ParticleSwarm({ motion, reducedMotion }: { motion: RefObject<SwarmMotion>; reducedMotion: boolean }) {
+  const { size, gl } = useThree()
+  const mobile = size.width < 720
+  const material = useRef<THREE.ShaderMaterial>(null)
+  const target = useRef(new THREE.Vector2())
+  const input = useRef({ active: false, pointerEnergy: 0, scrollEnergy: 0, scrollY: window.scrollY })
+  const geometry = useMemo(() => {
+    const count = mobile ? 900 : 4000
+    const positions = new Float32Array(count * 3)
+    const seeds = new Float32Array(count)
+    for (let i = 0; i < count; i += 1) {
+      positions[i * 3] = (Math.random() - 0.5) * 14
+      positions[i * 3 + 1] = (Math.random() - 0.5) * 9
+      positions[i * 3 + 2] = -8 + Math.random() * 13
+      seeds[i] = Math.random()
+    }
+    const result = new THREE.BufferGeometry()
+    result.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    result.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 1))
+    return result
+  }, [mobile])
+  const uniforms = useMemo(() => ({
+    uTime: { value: 0 }, uSwirl: { value: 0 }, uEnergy: { value: 0 },
+    uPointer: { value: new THREE.Vector2() }, uAttract: { value: 0 },
+    uAspect: { value: 1 }, uDpr: { value: 1 }, uOpacity: { value: 0 },
+  }), [])
+  useEffect(() => {
+    const move = (event: PointerEvent) => {
+      if (event.pointerType === 'touch') { input.current.active = false; return }
+      const x = event.clientX / window.innerWidth * 2 - 1
+      const y = 1 - event.clientY / window.innerHeight * 2
+      input.current.pointerEnergy = Math.min(1, input.current.pointerEnergy + Math.hypot(x - target.current.x, y - target.current.y) * 2)
+      target.current.set(x, y)
+      input.current.active = true
+    }
+    const leave = (event: PointerEvent) => { if (!event.relatedTarget) input.current.active = false }
+    const blur = () => { input.current.active = false }
+    const scroll = () => {
+      const delta = window.scrollY - input.current.scrollY
+      input.current.scrollY = window.scrollY
+      // The infinite-scroll seam is a jump, not a gesture.
+      if (Math.abs(delta) > window.innerHeight * 1.5) return
+      input.current.scrollEnergy = Math.min(1, input.current.scrollEnergy + Math.abs(delta) / Math.max(window.innerHeight, 1) * 3)
+      motion.current.swirl += Math.abs(delta) / Math.max(window.innerHeight, 1) * 0.22
+    }
+    window.addEventListener('pointermove', move, { passive: true })
+    window.addEventListener('pointerout', leave)
+    window.addEventListener('blur', blur)
+    window.addEventListener('scroll', scroll, { passive: true })
+    return () => {
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerout', leave)
+      window.removeEventListener('blur', blur)
+      window.removeEventListener('scroll', scroll)
+      geometry.dispose()
+    }
+  }, [geometry, motion])
+  useFrame(({ clock }, delta) => {
+    const dt = Math.min(delta, 0.1)
+    motion.current.pointer.lerp(target.current, 1 - Math.exp(-dt * 2))
+    motion.current.active = input.current.active && !reducedMotion
+    input.current.pointerEnergy *= Math.exp(-dt * 2.5)
+    input.current.scrollEnergy *= Math.exp(-dt * 2)
+    motion.current.energy = Math.max(input.current.pointerEnergy, input.current.scrollEnergy)
+    if (!material.current) return
+    // R3F can hold its own uniform objects; update the live material directly.
+    const live = material.current.uniforms
+    live.uTime.value = reducedMotion ? 0 : clock.getElapsedTime()
+    live.uSwirl.value = reducedMotion ? 0 : motion.current.swirl
+    live.uEnergy.value = reducedMotion ? 0 : motion.current.energy
+    live.uPointer.value.copy(motion.current.pointer)
+    live.uAttract.value = THREE.MathUtils.lerp(live.uAttract.value, motion.current.active ? 1 : 0, 1 - Math.exp(-dt * 2))
+    live.uAspect.value = size.width / Math.max(size.height, 1)
+    live.uDpr.value = gl.getPixelRatio()
+    const phase = chapterPhase()
+    live.uOpacity.value = THREE.MathUtils.smoothstep(phase, 1.35, 1.8) * (1 - THREE.MathUtils.smoothstep(phase, 2.53, 2.97))
+  })
+  return <points geometry={geometry} frustumCulled={false}>
+    <shaderMaterial ref={material} transparent depthWrite={false} blending={THREE.AdditiveBlending} uniforms={uniforms} vertexShader={/* glsl */ `
+      attribute float aSeed;
+      uniform float uTime, uSwirl, uEnergy, uAttract, uAspect, uDpr;
+      uniform vec2 uPointer;
+      varying float vGlow;
+      void main() {
+        vec3 p = position;
+        float angle = -uSwirl * (0.45 + aSeed * 0.55);
+        mat2 rotation = mat2(cos(angle), sin(angle), -sin(angle), cos(angle));
+        p.xy = rotation * p.xy;
+        p.xy += vec2(sin(uTime * 0.18 + aSeed * 20.0), cos(uTime * 0.13 + aSeed * 17.0)) * (0.08 + uEnergy * 0.15);
+        vec4 view = modelViewMatrix * vec4(p, 1.0);
+        vec4 clip = projectionMatrix * view;
+        vec2 screen = clip.xy / max(clip.w, 0.001);
+        vec2 toward = (uPointer - screen) * vec2(uAspect, 1.0);
+        float distanceToPointer = length(toward);
+        float influence = 1.0 - smoothstep(0.12, 1.15, distanceToPointer);
+        float repel = 1.0 - smoothstep(0.0, 0.25, distanceToPointer);
+        vec2 direction = toward / max(distanceToPointer, 0.001);
+        vec2 displacement = toward * influence * (0.14 + uEnergy * 0.04) - direction * repel * 0.16;
+        clip.xy += displacement / vec2(uAspect, 1.0) * uAttract * clip.w;
+        gl_Position = clip;
+        gl_PointSize = clamp((3.5 + aSeed * 3.5) * uDpr * 7.0 / max(1.0, -view.z), 2.0 * uDpr, 10.0 * uDpr);
+        vGlow = 0.55 + aSeed * 0.45;
+      }`} fragmentShader={/* glsl */ `
+      uniform float uOpacity;
+      varying float vGlow;
+      void main() {
+        float d = length(gl_PointCoord - 0.5);
+        float glow = exp(-d * d * 14.0) * (1.0 - smoothstep(0.35, 0.5, d));
+        gl_FragColor = vec4(vec3(1.0, 0.58, 0.3), glow * vGlow * uOpacity);
+      }`} />
   </points>
 }
 
-function CameraDirector({ reducedMotion, neuralGroup, oreGroup, crystalTip }: { reducedMotion: boolean; neuralGroup: RefObject<THREE.Group | null>; oreGroup: RefObject<THREE.Group | null>; crystalTip: RefObject<THREE.Object3D | null> }) {
-  const { camera, pointer } = useThree()
+
+function CameraDirector({ reducedMotion, neuralGroup, oreGroup, crystalTip, motion }: { reducedMotion: boolean; neuralGroup: RefObject<THREE.Group | null>; oreGroup: RefObject<THREE.Group | null>; crystalTip: RefObject<THREE.Object3D | null>; motion: RefObject<SwarmMotion> }) {
+  const { camera } = useThree()
   const currentLook = useRef(new THREE.Vector3())
   const targetPosition = useRef(new THREE.Vector3())
   const targetLook = useRef(new THREE.Vector3())
@@ -439,7 +649,7 @@ function CameraDirector({ reducedMotion, neuralGroup, oreGroup, crystalTip }: { 
   const oreDirection = useMemo(() => new THREE.Vector3(), [])
   const oreDetail = useMemo(() => new THREE.Vector3(), [])
   const oreClosePosition = useMemo(() => new THREE.Vector3(), [])
-  useFrame(({ clock }) => {
+  useFrame(({ clock }, delta) => {
     const phase = chapterPhase()
     const transitionOne = THREE.MathUtils.smoothstep(phase, 0.35, 0.95)
     const transitionTwo = THREE.MathUtils.smoothstep(phase, 1.2, 1.7)
@@ -468,18 +678,24 @@ function CameraDirector({ reducedMotion, neuralGroup, oreGroup, crystalTip }: { 
         crystalTip.current.getWorldPosition(oreDetail)
         oreDetail.y -= 0.14
         oreClosePosition.copy(oreDetail).addScaledVector(oreDirection, 1.35)
-        const oreCloseUp = THREE.MathUtils.smoothstep(phase, 1.34, 1.54)
-          * (1 - THREE.MathUtils.smoothstep(phase, 1.63, 1.98))
+        const oreCloseUp = THREE.MathUtils.smoothstep(phase, 1.6, 1.76)
+          * (1 - THREE.MathUtils.smoothstep(phase, 1.8, 2.0))
         targetPosition.current.lerp(oreClosePosition, oreCloseUp)
         targetLook.current.lerp(oreDetail, oreCloseUp)
         closeUp = Math.max(closeUp, oreCloseUp)
       }
-      targetPosition.current.x += pointer.x * 0.22 * (1 - closeUp)
-      targetPosition.current.y += pointer.y * 0.14 * (1 - closeUp)
+      const pointer = motion.current.pointer
+      const parallax = motion.current.active ? 1 : 0
+      targetPosition.current.x += pointer.x * 0.36 * parallax * (1 - closeUp)
+      targetPosition.current.y += (pointer.y * 0.24 * parallax + Math.sin(phase * Math.PI * 2 / 3) * 0.25) * (1 - closeUp)
+      targetLook.current.x += pointer.x * 0.16 * parallax * (1 - closeUp)
+      targetLook.current.y += pointer.y * 0.1 * parallax * (1 - closeUp)
       targetPosition.current.z += Math.sin(clock.getElapsedTime() * 0.45) * 0.13 * (1 - closeUp)
     }
-    camera.position.lerp(targetPosition.current, reducedMotion ? 1 : 0.1)
-    currentLook.current.lerp(targetLook.current, reducedMotion ? 1 : 0.1)
+    // Keep the camera's easing consistent at different frame rates.
+    const damping = reducedMotion ? 1 : 1 - Math.exp(-Math.min(delta, 0.1) * 6.3)
+    camera.position.lerp(targetPosition.current, damping)
+    currentLook.current.lerp(targetLook.current, damping)
     camera.lookAt(currentLook.current)
   })
   return null
@@ -514,7 +730,7 @@ type OreScanUniforms = {
 }
 
 const ORE_RIPPLE_COUNT = 12
-const ORE_RIPPLE_LIFETIME = 2.5
+const ORE_RIPPLE_LIFETIME = 3.7
 
 // A fine triangular surface lattice and expanding pulse follow the real
 // raycast hit, rather than being projected onto a sphere around the ore.
@@ -549,8 +765,8 @@ function configureOreScan(shader: THREE.WebGLProgramParametersWithUniforms, unif
       for (int i = 0; i < 12; i++) {
         float age = uScans[i].w;
         float scanDistance = distance(vScanWorld, uScans[i].xyz);
-        float fade = smoothstep(0.0, 0.12, age) * (1.0 - smoothstep(0.25, 2.5, age));
-        float scanRadius = age * 0.62;
+        float fade = smoothstep(0.0, 0.18, age) * (1.0 - smoothstep(0.37, ${ORE_RIPPLE_LIFETIME.toFixed(1)}, age));
+        float scanRadius = age * 0.42;
         float ringDistance = (scanDistance - scanRadius) / 0.08;
         float ring = exp(-ringDistance * ringDistance);
         pulse = max(pulse, ring * fade);
@@ -639,6 +855,7 @@ function rockRadius(d: THREE.Vector3) {
 
 function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THREE.Group | null>; crystalTip: RefObject<THREE.Object3D | null>; reducedMotion: boolean }) {
   const outer = useRef<THREE.Group>(null)
+  const glint = useRef<THREE.Sprite>(null)
   const oreKeyLight = useRef<THREE.PointLight>(null)
   const oreRimLight = useRef<THREE.PointLight>(null)
   const materials = useRef<THREE.Material[]>([])
@@ -665,6 +882,30 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
   const crystalShader = useMemo(() => (shader: THREE.WebGLProgramParametersWithUniforms) => configureOreScan(shader, scanUniforms), [scanUniforms])
   const { size, gl } = useThree()
   const mobile = size.width < 720
+  const glintTexture = useMemo(() => {
+    const canvas = document.createElement('canvas')
+    // Draw at higher resolution so the fine ray edges survive a close-up.
+    canvas.width = canvas.height = 512
+    const context = canvas.getContext('2d')!
+    context.scale(4, 4)
+    const glow = context.createRadialGradient(64, 64, 0, 64, 64, 63)
+    glow.addColorStop(0, 'rgba(255,255,255,0.85)')
+    glow.addColorStop(0.07, 'rgba(220,237,255,0.52)')
+    glow.addColorStop(0.28, 'rgba(180,211,255,0.15)')
+    glow.addColorStop(1, 'rgba(160,200,255,0)')
+    context.fillStyle = glow
+    context.fillRect(0, 0, 128, 128)
+    // A narrow, opaque core sits on top of the diffuse halo.
+    context.fillStyle = 'rgba(255,255,255,0.98)'
+    context.beginPath()
+    context.moveTo(64, 4); context.lineTo(65.3, 62.7); context.lineTo(112, 64)
+    context.lineTo(65.3, 65.3); context.lineTo(64, 124); context.lineTo(62.7, 65.3)
+    context.lineTo(16, 64); context.lineTo(62.7, 62.7); context.closePath()
+    context.fill()
+    const texture = new THREE.CanvasTexture(canvas)
+    texture.colorSpace = THREE.SRGBColorSpace
+    return texture
+  }, [])
   const envMap = useMemo(() => {
     const pmrem = new THREE.PMREMGenerator(gl)
     const texture = pmrem.fromScene(new RoomEnvironment(), 0.04).texture
@@ -749,16 +990,26 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
       window.removeEventListener('touchmove', touchMove)
       document.body.style.cursor = ''
       envMap.dispose()
+      glintTexture.dispose()
       scene.rock.dispose()
       scene.crystals.forEach((c) => c.geometry.dispose())
     }
-  }, [envMap, scene])
+  }, [envMap, glintTexture, scene])
 
   useFrame(({ clock, camera }, delta) => {
     const phase = chapterPhase()
     const p = Math.min(phase / 2, 1)
-    const visible = THREE.MathUtils.smoothstep(phase, 1.38, 1.68) * (1 - THREE.MathUtils.smoothstep(phase, 2.58, 2.96))
+    const visible = THREE.MathUtils.smoothstep(phase, 1.34, 1.76) * (1 - THREE.MathUtils.smoothstep(phase, 2.53, 2.97))
     const t = clock.getElapsedTime()
+    if (glint.current) {
+      // Peak at the closest point of the crystal-tip camera move, fading in
+      // and out with scroll progress (including when scrolling backwards).
+      const sparkle = reducedMotion ? 0 : THREE.MathUtils.smoothstep(phase, 1.64, 1.75) * (1 - THREE.MathUtils.smoothstep(phase, 1.82, 1.94))
+      const material = glint.current.material as THREE.SpriteMaterial
+      material.opacity = sparkle * visible * 0.9
+      glint.current.scale.setScalar(0.16 + sparkle * 0.14)
+      glint.current.visible = material.opacity > 0.001
+    }
     const now = performance.now() / 1000
     if (group.current && outer.current) {
       if (!drag.current.active) {
@@ -766,8 +1017,9 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
         spinVelocity.current.multiplyScalar(0.94)
       }
       spin.current.x = THREE.MathUtils.clamp(spin.current.x, -1.2, 1.2)
-      group.current.rotation.y = t * 0.12 + p * Math.PI * 1.5 + spin.current.y
-      group.current.rotation.x = 0.12 + Math.sin(t * 0.3) * 0.06 + (p - 0.8) * 0.4 + spin.current.x
+      const scrollTurn = reducedMotion ? 0 : THREE.MathUtils.smoothstep(phase, 1.35, 2.55)
+      group.current.rotation.y = t * 0.12 + p * Math.PI * 1.5 + scrollTurn * Math.PI * 1.35 + spin.current.y
+      group.current.rotation.x = 0.12 + Math.sin(t * 0.3) * 0.06 + (p - 0.8) * 0.4 + scrollTurn * 0.25 + spin.current.x
       const revealDrift = reducedMotion ? 0 : THREE.MathUtils.smoothstep(phase, 1.25, 1.5) * (1 - THREE.MathUtils.smoothstep(phase, 1.65, 2))
       outer.current.position.x = (mobile ? 1.25 : 2.75) - revealDrift * 0.35
       outer.current.position.y = -0.38 + Math.sin(t * 0.6) * 0.08 + (0.8 - p) * 0.9
@@ -787,7 +1039,7 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
         else scanSmoothed.lerp(scanTarget, 1 - Math.exp(-Math.min(delta, 0.1) * 16))
       }
       if (hit.current && !reducedMotion && pointerKind.current !== 'touch'
-        && scan.pointerRevision !== scan.emittedRevision && now - scan.lastMotion < 0.3 && now - scan.lastEmission >= 0.2) {
+        && scan.pointerRevision !== scan.emittedRevision && now - scan.lastMotion < 0.3 && now - scan.lastEmission >= 0.3) {
         // Never reuse an active ripple: if the pool is full, wait for one to
         // finish instead of cutting a travelling wave short.
         for (let offset = 0; offset < scanOrigins.length; offset += 1) {
@@ -835,7 +1087,11 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
       </mesh>
       {scene.crystals.map((c, index) => <mesh key={index} geometry={c.geometry} position={c.position} quaternion={c.quaternion}>
         <meshPhysicalMaterial ref={keep} color={c.tint} vertexColors envMap={envMap} envMapIntensity={1.1} metalness={0.88} roughness={0.2} clearcoat={0.3} clearcoatRoughness={0.15} onBeforeCompile={crystalShader} flatShading depthWrite={false} transparent opacity={0} />
-        {index === 0 && <object3D ref={crystalTip} position={[0, c.height / 2, 0]} />}
+        {index === 0 && <object3D ref={crystalTip} position={[0, c.height / 2, 0]}>
+          <sprite ref={glint} raycast={() => null} visible={false}>
+            <spriteMaterial map={glintTexture} transparent opacity={0} depthWrite={false} depthTest={false} blending={THREE.AdditiveBlending} toneMapped={false} />
+          </sprite>
+        </object3D>}
       </mesh>)}
       {scene.rubble.map((r, index) => <mesh key={index} position={r.position} scale={r.scale} rotation={[index, index * 2, 0]}>
         <dodecahedronGeometry args={[1, 0]} />
@@ -927,22 +1183,34 @@ function RenderOnScroll({ enabled }: { enabled: boolean }) {
   return null
 }
 
+class CanvasBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false }
+  static getDerivedStateFromError() { return { failed: true } }
+  render() {
+    return this.state.failed ? <div className="canvas-fallback" /> : this.props.children
+  }
+}
+
 function SignalCanvas({ reducedMotion, documentVisible }: { reducedMotion: boolean; documentVisible: boolean }) {
+  const [contextLost, setContextLost] = useState(false)
   const neuralGroup = useRef<THREE.Group>(null)
   const oreGroup = useRef<THREE.Group>(null)
   const crystalTip = useRef<THREE.Object3D>(null)
+  const swarmMotion = useRef<SwarmMotion>({ pointer: new THREE.Vector2(), active: false, energy: 0, swirl: 0 })
   const repulsion = useMemo<RepulsionUniforms>(() => ({
     uRepelPointer: { value: new THREE.Vector2() },
     uRepelAspect: { value: 1 },
     uRepelStrength: { value: 0 },
   }), [])
+  if (contextLost) return <div className="canvas-fallback" />
   return (
     <Canvas
-      dpr={[1, window.innerWidth < 720 ? 1.5 : 2]}
+      dpr={[1, window.innerWidth < 720 ? 1.25 : 2]}
       frameloop={!documentVisible ? 'never' : reducedMotion ? 'demand' : 'always'}
       camera={{ position: [0, 0, 6.3], fov: 44 }}
       gl={{ antialias: false, powerPreference: 'high-performance', toneMapping: THREE.ACESFilmicToneMapping }}
-      fallback={<div className="canvas-fallback">Knowledge begins as signal.</div>}
+      onCreated={({ gl }) => gl.domElement.addEventListener('webglcontextlost', () => setContextLost(true), { once: true })}
+      fallback={<div className="canvas-fallback" />}
     >
       <color attach="background" args={['#070809']} />
       <fog attach="fog" args={['#070809', 3.5, 12]} />
@@ -951,21 +1219,18 @@ function SignalCanvas({ reducedMotion, documentVisible }: { reducedMotion: boole
       <pointLight position={[-4, -2, 2]} intensity={8} color="#b9d6df" distance={10} />
       <DigitalRain reducedMotion={reducedMotion} />
       <RepulsionController uniforms={repulsion} reducedMotion={reducedMotion} />
+      <ParticleSwarm motion={swarmMotion} reducedMotion={reducedMotion} />
       <CosmicParticles repulsion={repulsion} />
-      <NeuralNetwork group={neuralGroup} repulsion={repulsion} />
       <OreCrystal group={oreGroup} crystalTip={crystalTip} reducedMotion={reducedMotion} />
-      <CameraDirector reducedMotion={reducedMotion} neuralGroup={neuralGroup} oreGroup={oreGroup} crystalTip={crystalTip} />
+      <NeuralNetwork group={neuralGroup} oreGroup={oreGroup} repulsion={repulsion} reducedMotion={reducedMotion} />
+      <CameraDirector reducedMotion={reducedMotion} neuralGroup={neuralGroup} oreGroup={oreGroup} crystalTip={crystalTip} motion={swarmMotion} />
       <RenderOnScroll enabled={reducedMotion && documentVisible} />
     </Canvas>
   )
 }
 
 function useScrollProgress() {
-  const [progress, setProgress] = useState(0)
   useEffect(() => {
-    let target = 0
-    let current = 0
-    let frame = 0
     // Chapter three is copied above chapter one and chapter one below chapter three, so the page can jump
     // by one loop period at either seam without a visible change and without ever reaching the document edges.
     const seams = () => {
@@ -978,31 +1243,22 @@ function useScrollProgress() {
       const y = window.scrollY
       if (period > 0 && y >= start + period) window.scrollTo({ top: y - period, behavior: 'instant' })
       else if (period > 0 && y < start) window.scrollTo({ top: y + period, behavior: 'instant' })
-      target = loopProgress()
-    }
-    const tick = () => {
-      current += (target - current) * 0.075
-      setProgress(current)
-      frame = requestAnimationFrame(tick)
     }
     if ('scrollRestoration' in history) history.scrollRestoration = 'manual'
     if (!location.hash) window.scrollTo({ top: seams().start, behavior: 'instant' })
     update()
     window.addEventListener('scroll', update, { passive: true })
     window.addEventListener('resize', update)
-    frame = requestAnimationFrame(tick)
     return () => {
-      cancelAnimationFrame(frame)
       window.removeEventListener('scroll', update)
       window.removeEventListener('resize', update)
     }
   }, [])
-  return progress
 }
 
 function useRenderPreferences() {
-  const [reducedMotion, setReducedMotion] = useState(false)
-  const [documentVisible, setDocumentVisible] = useState(true)
+  const [reducedMotion, setReducedMotion] = useState(() => window.matchMedia('(prefers-reduced-motion: reduce)').matches)
+  const [documentVisible, setDocumentVisible] = useState(() => !document.hidden)
   useEffect(() => {
     const media = window.matchMedia('(prefers-reduced-motion: reduce)')
     const onMotionChange = () => setReducedMotion(media.matches)
@@ -1155,7 +1411,7 @@ export function Experience() {
   const { reducedMotion, documentVisible } = useRenderPreferences()
   return (
     <main>
-      <div className="webgl-shell" aria-hidden="true"><SignalCanvas reducedMotion={reducedMotion} documentVisible={documentVisible} /></div>
+      <div className="webgl-shell" aria-hidden="true"><CanvasBoundary><SignalCanvas reducedMotion={reducedMotion} documentVisible={documentVisible} /></CanvasBoundary></div>
       <header className="chrome">
         <a className="brand" href="#signal" aria-label="Claude Expert home">claude<span>.expert</span></a>
         <div className="chrome-controls">
@@ -1173,12 +1429,25 @@ export function Experience() {
 
       <section id="mind" className="chapter mind" aria-label="Chapter two: Mind">
         <p>Mind</p>
-        <div><h2>When applied<br />it becomes <em>Value</em></h2><span className="mind-caption">Connecting the right dots</span></div>
+        <div><RainHeadline lines={['When applied', 'it becomes Value']} /><span className="mind-caption">Connecting the right dots</span></div>
       </section>
       <PotentialChapter id="potential" />
       <SignalChapter id="loop" hidden />
     </main>
   )
+}
+
+function RainHeadline({ lines, hero = false }: { lines: string[]; hero?: boolean }) {
+  const rainLetters = (text: string, offset: number) => [...text].map((letter, index) => {
+    if (letter === ' ') return <span key={index} className="rain-space">&nbsp;</span>
+    const sequence = offset + index
+    return <span key={index} className="rain-letter" style={{ '--glyph-delay': `${-((sequence * 0.61) % 7)}s` } as CSSProperties}>
+      <span>{letter}</span>
+    </span>
+  })
+  const content = <span aria-hidden="true">{lines.map((line, index) => <span key={index} className="rain-line">{rainLetters(line, index * 9)}</span>)}</span>
+  const label = lines.join(' ')
+  return hero ? <h1 className="rain-headline" aria-label={label}>{content}</h1> : <h2 className="rain-headline" aria-label={label}>{content}</h2>
 }
 
 // Chapter one, rendered twice: once at the top and once after chapter three as the seam for the infinite loop.
@@ -1187,7 +1456,7 @@ function SignalChapter({ id, hidden = false }: { id: string; hidden?: boolean })
       <section id={id} className="chapter signal" aria-hidden={hidden || undefined}>
         <div className="chapter-index">Signal</div>
         <div className="hero-copy">
-          <h1>Knowledge<br />is <em>abundant.</em></h1>
+          <RainHeadline hero lines={['Knowledge', 'is abundant.']} />
           <p className="deck">Every breakthrough starts as a small, living pattern inside the noise.</p>
         </div>
         <div className="scroll-prompt">Scroll to decode</div>
@@ -1200,7 +1469,7 @@ function PotentialChapter({ id, hidden = false }: { id: string; hidden?: boolean
   return (
       <section id={id} className="chapter potential" aria-label={hidden ? undefined : 'Chapter three: Potential'} aria-hidden={hidden || undefined} inert={hidden || undefined}>
         <p>Potential</p>
-        <div className="potential-copy"><h2><em>Crystalize</em></h2><p className="ore-note">People are paying $500 for websites like this</p><a className="cta" href="https://claude-expert.pages.dev/">Learn how to do this <span>↗</span></a></div>
+        <div className="potential-copy"><RainHeadline lines={['Crystalize']} /><p className="ore-note">Learn how to make websites like this</p><a className="cta" href="https://claude-expert.pages.dev/">become claude.expert <span>↗</span></a></div>
       </section>
   )
 }
