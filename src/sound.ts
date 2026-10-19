@@ -1,4 +1,5 @@
-// An entirely synthesized soundtrack: no remote assets, downloads or autoplay.
+/// <reference types="vite/client" />
+// Sound is opt-in; the supplied Matrix sample is loaded only after activation.
 export class Soundscape {
   private readonly context = new AudioContext()
   private readonly master = this.context.createGain()
@@ -6,6 +7,11 @@ export class Soundscape {
   private readonly texture = this.context.createGain()
   private readonly networkMotion = this.context.createGain()
   private readonly networkAir = this.context.createGain()
+  private readonly glyphSampleGain = this.context.createGain()
+  private readonly neuralSampleGain = this.context.createGain()
+  private glyphSample: AudioBufferSourceNode | null = null
+  private neuralSample: AudioBufferSourceNode | null = null
+  private crystalZoomBuffer: AudioBuffer | null = null
   private readonly voices: OscillatorNode[] = []
   private readonly noise: AudioBufferSourceNode
   private step = 0
@@ -56,13 +62,79 @@ export class Soundscape {
     networkFilter.frequency.value = 150
     this.networkAir.gain.value = 0
     this.noise.connect(networkFilter).connect(this.networkAir).connect(this.master)
+    this.glyphSampleGain.gain.value = 0
+    this.glyphSampleGain.connect(this.master)
+    this.neuralSampleGain.gain.value = 0
+    this.neuralSampleGain.connect(this.master)
     this.noise.start()
   }
 
   async start() {
     await this.context.resume()
     if (this.context.state !== 'running') throw new Error('Audio could not be started')
-    this.master.gain.setTargetAtTime(0.65, this.context.currentTime, 0.8)
+    this.master.gain.setTargetAtTime(0.65, this.context.currentTime, 0.15)
+    // An audible confirmation above the phone-speaker bass range.
+    this.tone(523.25, 0.025, 1.1, 0.12)
+    this.tone(783.99, 0.012, 1.0, 0.24)
+    void this.loadGlyphSample()
+    void this.loadNeuralSample()
+    void this.loadCrystalZoomSample()
+  }
+
+  private async loadCrystalZoomSample() {
+    try {
+      const response = await fetch(`${import.meta.env.BASE_URL}audio/crystal-shatter.mp3`)
+      if (!response.ok) throw new Error('Crystal audio unavailable')
+      const buffer = await this.context.decodeAudioData(await response.arrayBuffer())
+      if (this.context.state !== 'closed') this.crystalZoomBuffer = buffer
+    } catch {
+      // Leave the crystal close-up silent if the recording cannot load.
+    }
+  }
+
+  crystalZoom() {
+    if (!this.crystalZoomBuffer || this.context.state !== 'running') return
+    const source = this.context.createBufferSource()
+    const gain = this.context.createGain()
+    source.buffer = this.crystalZoomBuffer
+    gain.gain.value = 0.3
+    source.connect(gain).connect(this.master)
+    source.onended = () => { source.disconnect(); gain.disconnect() }
+    source.start()
+  }
+
+  private async loadNeuralSample() {
+    try {
+      const response = await fetch(`${import.meta.env.BASE_URL}audio/neural-trance.mp3`)
+      if (!response.ok) throw new Error('Neural audio unavailable')
+      const buffer = await this.context.decodeAudioData(await response.arrayBuffer())
+      if (this.context.state === 'closed') return
+      const source = this.context.createBufferSource()
+      source.buffer = buffer
+      source.loop = true
+      source.connect(this.neuralSampleGain)
+      source.start()
+      this.neuralSample = source
+    } catch {
+      // Other sounds remain available if this recording cannot load.
+    }
+  }
+
+  private async loadGlyphSample() {
+    try {
+      const response = await fetch(`${import.meta.env.BASE_URL}audio/matrix-warp.mp3`)
+      if (!response.ok) throw new Error('Matrix audio unavailable')
+      const buffer = await this.context.decodeAudioData(await response.arrayBuffer())
+      if (this.context.state === 'closed') return
+      const source = this.context.createBufferSource()
+      source.buffer = buffer
+      source.loop = true
+      source.connect(this.glyphSampleGain)
+      source.start()
+      this.glyphSample = source
+    } catch {
+      // If the recording cannot load, the glyph zoom remains silent.
+    }
   }
 
   update(phase: number) {
@@ -70,6 +142,9 @@ export class Soundscape {
     // Signal is airy; Mind is fuller; Potential settles into a darker bed.
     const mind = Math.max(0, 1 - Math.abs(phase - 1))
     const ore = Math.max(0, 1 - Math.abs(phase - 2))
+    const fade = (x: number) => { const t = Math.max(0, Math.min(1, x)); return t * t * (3 - 2 * t) }
+    const neuralPresence = fade((phase - 0.55) / 0.35) * (1 - fade((phase - 1.3) / 0.4))
+    this.neuralSampleGain.gain.setTargetAtTime(neuralPresence * 0.3, now, 0.35)
     this.drone.gain.setTargetAtTime(0.028 + mind * 0.012 + ore * 0.006, now, 0.8)
     this.texture.gain.setTargetAtTime(0.002 + mind * 0.001 + ore * 0.0015, now, 0.8)
   }
@@ -88,6 +163,12 @@ export class Soundscape {
     const now = this.context.currentTime
     this.networkMotion.gain.setTargetAtTime(level * 0.014, now, level ? 0.12 : 0.4)
     this.networkAir.gain.setTargetAtTime(level * 0.009, now, level ? 0.12 : 0.4)
+  }
+
+  glyphZoom(intensity: number) {
+    const level = Math.max(0, Math.min(1, intensity))
+    const now = this.context.currentTime
+    this.glyphSampleGain.gain.setTargetAtTime(level * 0.22, now, level ? 0.18 : 0.35)
   }
 
   cue(kind: 'navigation' | 'crystal') {
@@ -163,10 +244,13 @@ export class Soundscape {
 
   suspend() { return this.context.suspend() }
   resume() { return this.context.resume() }
+  get isRunning() { return this.context.state === 'running' }
 
   async close() {
     this.voices.forEach((voice) => voice.stop())
     this.noise.stop()
+    this.glyphSample?.stop()
+    this.neuralSample?.stop()
     await this.context.close()
   }
 }

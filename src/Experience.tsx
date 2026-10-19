@@ -12,7 +12,7 @@ const RAIN_CELL_PX = window.innerWidth < 720 ? 15 : 19
 
 // Scene progress 0..1 across the three chapters, rewinding to 0 while the looped copy of chapter one scrolls in.
 // The page repeats every loop period, so positions in the lead-in copy of chapter three map onto the real one.
-function chapterPhase() {
+function rawChapterPhase() {
   const start = document.getElementById('signal')?.offsetTop ?? 0
   const mind = (document.getElementById('mind')?.offsetTop ?? 0) - start
   const potential = (document.getElementById('potential')?.offsetTop ?? 0) - start
@@ -21,6 +21,49 @@ function chapterPhase() {
   if (y < mind) return y / Math.max(1, mind)
   if (y < potential) return 1 + (y - mind) / Math.max(1, potential - mind)
   return 2 + (y - potential) / Math.max(1, period - potential)
+}
+
+// A single eased timeline keeps all WebGL layers in step, including at the loop seam.
+let visualPhase: number | null = null
+function chapterPhase() {
+  return visualPhase ?? rawChapterPhase()
+}
+
+function ScrollMotion({ reducedMotion }: { reducedMotion: boolean }) {
+  const speed = useRef(0)
+  const lastBlur = useRef(-1)
+  const shell = useRef<HTMLElement | null>(null)
+  const blurDevice = useMemo(() => window.matchMedia('(min-width: 721px) and (hover: hover) and (pointer: fine)'), [])
+  const mobile = useMemo(() => window.matchMedia('(max-width: 720px)'), [])
+  useEffect(() => {
+    visualPhase = rawChapterPhase()
+    shell.current = document.querySelector<HTMLElement>('.webgl-shell')
+    return () => {
+      visualPhase = null
+      if (shell.current) shell.current.style.filter = ''
+    }
+  }, [reducedMotion])
+  useFrame((_, delta) => {
+    const target = rawChapterPhase()
+    const dt = Math.min(delta, 0.1)
+    const current = visualPhase ?? target
+    // Choose the shortest path across the 0/3 boundary instead of rotating through all chapters.
+    const difference = ((target - current + 4.5) % 3) - 1.5
+    const next = reducedMotion ? target : current + difference * (1 - Math.exp(-dt * (mobile.matches ? 7 : 12)))
+    visualPhase = (next + 3) % 3
+
+    // A small velocity-driven softening suggests motion without blurring text or burdening mobile GPUs.
+    if (!shell.current) return
+    const allowBlur = !reducedMotion && blurDevice.matches
+    const targetSpeed = allowBlur && dt > 0 ? Math.min(1, Math.abs(difference) / dt * 0.035) : 0
+    speed.current += (targetSpeed - speed.current) * (1 - Math.exp(-dt * 9))
+    const blur = speed.current < 0.02 ? 0 : Math.round(speed.current * 8) / 10
+    if (blur !== lastBlur.current) {
+      shell.current.style.filter = blur ? `blur(${blur}px)` : ''
+      lastBlur.current = blur
+    }
+  }, -100)
+  return null
 }
 
 function loopProgress() {
@@ -394,7 +437,7 @@ function NeuralNetwork({ group, oreGroup, repulsion, reducedMotion }: { group: R
   useEffect(() => {
     const addNode = (event: PointerEvent) => {
       const phase = chapterPhase()
-      if (event.button !== 0 || phase < 0.85 || phase > 1.3 || !group.current || (event.target instanceof Element && event.target.closest('a, button, input, select, textarea'))) return
+      if (event.pointerType === 'touch' || event.button !== 0 || phase < 0.85 || phase > 1.3 || !group.current || (event.target instanceof Element && event.target.closest('a, button, input, select, textarea'))) return
       raycaster.setFromCamera(new THREE.Vector2(event.clientX / window.innerWidth * 2 - 1, 1 - event.clientY / window.innerHeight * 2), camera)
       group.current.getWorldPosition(clickPoint)
       clickPlane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(new THREE.Vector3()), clickPoint)
@@ -988,7 +1031,8 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
       spinVelocity.current.set(dy, dx)
     }
     const down = (e: PointerEvent) => {
-      if (!hit.current) return
+      // Touch gestures belong to native scrolling; dragging the rock is a mouse interaction.
+      if (e.pointerType === 'touch' || !hit.current) return
       e.preventDefault()
       drag.current = { active: true, x: e.clientX, y: e.clientY }
       spinVelocity.current.set(0, 0)
@@ -999,19 +1043,15 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
       drag.current.active = false
       document.body.style.cursor = hit.current ? 'grab' : ''
     }
-    // Hold the page still while a touch drag is rotating the asteroid.
-    const touchMove = (e: TouchEvent) => { if (drag.current.active) e.preventDefault() }
     window.addEventListener('pointermove', move, { passive: true })
     window.addEventListener('pointerdown', down)
     window.addEventListener('pointerup', up)
     window.addEventListener('pointercancel', up)
-    window.addEventListener('touchmove', touchMove, { passive: false })
     return () => {
       window.removeEventListener('pointermove', move)
       window.removeEventListener('pointerdown', down)
       window.removeEventListener('pointerup', up)
       window.removeEventListener('pointercancel', up)
-      window.removeEventListener('touchmove', touchMove)
       document.body.style.cursor = ''
       envMap.dispose()
       glintTexture.dispose()
@@ -1220,7 +1260,61 @@ class CanvasBoundary extends Component<{ children: ReactNode }, { failed: boolea
   }
 }
 
-function SignalCanvas({ reducedMotion, documentVisible }: { reducedMotion: boolean; documentVisible: boolean }) {
+function OreButtonAnchor({ oreGroup, buttonAnchor }: { oreGroup: RefObject<THREE.Group | null>; buttonAnchor: RefObject<HTMLSpanElement | null> }) {
+  const point = useMemo(() => new THREE.Vector3(), [])
+  const dimensions = useRef({ width: 0, height: 0 })
+  const position = useRef<THREE.Vector2 | null>(null)
+  const motionPreference = useMemo(() => window.matchMedia('(prefers-reduced-motion: reduce)'), [])
+  useEffect(() => {
+    const element = buttonAnchor.current
+    if (!element) return
+    const measure = () => { dimensions.current = { width: element.offsetWidth, height: element.offsetHeight } }
+    measure()
+    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null
+    observer?.observe(element)
+    window.addEventListener('resize', measure)
+    return () => {
+      observer?.disconnect()
+      window.removeEventListener('resize', measure)
+      element.classList.remove('is-world-anchored')
+      element.style.opacity = ''
+      element.style.pointerEvents = ''
+    }
+  }, [buttonAnchor])
+  useFrame(({ camera, size }, delta) => {
+    const element = buttonAnchor.current
+    if (!element || !oreGroup.current) return
+    const phase = chapterPhase()
+    const visibility = THREE.MathUtils.smoothstep(phase, 1.78, 1.98) * (1 - THREE.MathUtils.smoothstep(phase, 2.48, 2.7))
+    element.classList.add('is-world-anchored')
+    element.style.opacity = `${visibility}`
+    element.style.pointerEvents = visibility > 0.95 ? 'auto' : 'none'
+    const link = element.querySelector('a')
+    if (link) link.tabIndex = visibility > 0.95 ? 0 : -1
+    // A billboard-like point in world space beside the specimen. The DOM link
+    // remains accessible and clickable while following the actual 3D camera.
+    oreGroup.current.getWorldPosition(point)
+    point.x += 0.2
+    point.y -= size.width < 720 ? 0.55 : 0.35
+    point.project(camera)
+    const halfWidth = dimensions.current.width / 2 + 16
+    const halfHeight = dimensions.current.height / 2 + (size.width < 720 ? 94 : 60)
+    const x = THREE.MathUtils.clamp((point.x * 0.5 + 0.5) * size.width, halfWidth, size.width - halfWidth)
+    const y = THREE.MathUtils.clamp((-point.y * 0.5 + 0.5) * size.height, halfHeight, size.height - halfHeight)
+    if (!position.current) position.current = new THREE.Vector2(x, y)
+    else if (visibility < 0.01 || motionPreference.matches) position.current.set(x, y)
+    else {
+      const damping = 1 - Math.exp(-Math.min(delta, 0.1) * 6)
+      position.current.x = THREE.MathUtils.lerp(position.current.x, x, damping)
+      position.current.y = THREE.MathUtils.lerp(position.current.y, y, damping)
+    }
+    element.style.setProperty('--world-x', `${position.current.x}px`)
+    element.style.setProperty('--world-y', `${position.current.y}px`)
+  })
+  return null
+}
+
+function SignalCanvas({ reducedMotion, documentVisible, buttonAnchor }: { reducedMotion: boolean; documentVisible: boolean; buttonAnchor: RefObject<HTMLSpanElement | null> }) {
   const [contextLost, setContextLost] = useState(false)
   const neuralGroup = useRef<THREE.Group>(null)
   const oreGroup = useRef<THREE.Group>(null)
@@ -1246,6 +1340,7 @@ function SignalCanvas({ reducedMotion, documentVisible }: { reducedMotion: boole
       <ambientLight intensity={0.25} color="#b7c5ca" />
       <pointLight position={[3, 2, 4]} intensity={14} color="#f06e4e" distance={10} />
       <pointLight position={[-4, -2, 2]} intensity={8} color="#b9d6df" distance={10} />
+      <ScrollMotion reducedMotion={reducedMotion} />
       <DigitalRain reducedMotion={reducedMotion} />
       <RepulsionController uniforms={repulsion} reducedMotion={reducedMotion} />
       <ParticleSwarm motion={swarmMotion} reducedMotion={reducedMotion} />
@@ -1253,6 +1348,7 @@ function SignalCanvas({ reducedMotion, documentVisible }: { reducedMotion: boole
       <OreCrystal group={oreGroup} crystalTip={crystalTip} reducedMotion={reducedMotion} />
       <NeuralNetwork group={neuralGroup} oreGroup={oreGroup} repulsion={repulsion} reducedMotion={reducedMotion} />
       <CameraDirector reducedMotion={reducedMotion} neuralGroup={neuralGroup} oreGroup={oreGroup} crystalTip={crystalTip} motion={swarmMotion} />
+      <OreButtonAnchor oreGroup={oreGroup} buttonAnchor={buttonAnchor} />
       <RenderOnScroll enabled={reducedMotion && documentVisible} />
     </Canvas>
   )
@@ -1274,7 +1370,11 @@ function useScrollProgress() {
       else if (period > 0 && y < start) window.scrollTo({ top: y + period, behavior: 'instant' })
     }
     if ('scrollRestoration' in history) history.scrollRestoration = 'manual'
-    if (!location.hash) window.scrollTo({ top: seams().start, behavior: 'instant' })
+    // Always begin at the opening, even if the browser restored a later
+    // chapter or the page was reloaded with a chapter hash in its URL.
+    history.replaceState(history.state, '', `${location.pathname}${location.search}#signal`)
+    window.scrollTo({ top: seams().start, behavior: 'instant' })
+    visualPhase = 0
     update()
     window.addEventListener('scroll', update, { passive: true })
     window.addEventListener('resize', update)
@@ -1283,6 +1383,41 @@ function useScrollProgress() {
       window.removeEventListener('resize', update)
     }
   }, [])
+}
+
+// A slow idle journey, never a replacement for the visitor's own navigation.
+function useIdleJourney(reducedMotion: boolean) {
+  useEffect(() => {
+    if (reducedMotion) return
+    let lastInteraction = performance.now()
+    let lastFrame = 0
+    let remainder = 0
+    let frame = 0
+    const pause = () => { lastInteraction = performance.now(); remainder = 0 }
+    const tick = (now: number) => {
+      const dt = lastFrame ? Math.min((now - lastFrame) / 1000, 0.05) : 0
+      lastFrame = now
+      const focused = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+      if (!document.hidden && !focused && now - lastInteraction > 5000) {
+        remainder += dt * 6 // pixels per second, independent of display refresh rate
+        const pixels = Math.floor(remainder)
+        if (pixels) {
+          remainder -= pixels
+          window.scrollBy({ top: pixels, behavior: 'instant' })
+        }
+      }
+      frame = requestAnimationFrame(tick)
+    }
+    const events = ['wheel', 'touchstart', 'touchmove', 'pointerdown', 'keydown'] as const
+    events.forEach(event => window.addEventListener(event, pause, { passive: true }))
+    document.addEventListener('visibilitychange', pause)
+    frame = requestAnimationFrame(tick)
+    return () => {
+      cancelAnimationFrame(frame)
+      events.forEach(event => window.removeEventListener(event, pause))
+      document.removeEventListener('visibilitychange', pause)
+    }
+  }, [reducedMotion])
 }
 
 function useRenderPreferences() {
@@ -1313,11 +1448,27 @@ function SoundToggle() {
   useEffect(() => () => { void sound.current?.close(); sound.current = null }, [])
   useEffect(() => {
     if (!enabled) return
-    const update = () => sound.current?.update(chapterPhase())
+    const motionPreference = window.matchMedia('(prefers-reduced-motion: reduce)')
+    let lastAudioPhase = chapterPhase()
+    let lastCrystalZoom = -Infinity
+    const update = () => {
+      const phase = chapterPhase()
+      sound.current?.update(phase)
+      const closeUpReached = (lastAudioPhase < 1.75 && phase >= 1.75 && phase < 2)
+        || (lastAudioPhase > 1.82 && phase <= 1.82 && phase > 1)
+      if (closeUpReached && !motionPreference.matches && !document.hidden && performance.now() - lastCrystalZoom > 2000) {
+        sound.current?.crystalZoom()
+        lastCrystalZoom = performance.now()
+      }
+      const difference = Math.abs(((phase - lastAudioPhase + 4.5) % 3) - 1.5)
+      const departure = signalDeparture(phase)
+      const presence = THREE.MathUtils.smoothstep(departure, 0.12, 0.42) * (1 - THREE.MathUtils.smoothstep(departure, 0.8, 0.98))
+      sound.current?.glyphZoom(motionPreference.matches || document.hidden ? 0 : presence * Math.min(1, difference * 90))
+      lastAudioPhase = phase
+    }
     const music = window.setInterval(() => sound.current?.note(chapterPhase()), 1700)
     const ambience = window.setInterval(update, 250)
     const crystal = () => sound.current?.cue('crystal')
-    const motionPreference = window.matchMedia('(prefers-reduced-motion: reduce)')
     let lastPointer: { x: number; y: number; time: number } | null = null
     let lastNetworkMotion = 0
     const networkMove = (event: PointerEvent) => {
@@ -1346,10 +1497,10 @@ function SoundToggle() {
     const pointerLeave = (event: PointerEvent) => { if (!event.relatedTarget) stopNetwork() }
     const thresholds = [0.55, 1.52, 2.55]
     const armed = thresholds.map(() => true)
-    let previousPhase = chapterPhase()
+    let previousPhase = rawChapterPhase()
     let lastTransition = 0
     const transition = () => {
-      const phase = chapterPhase()
+      const phase = rawChapterPhase()
       let delta = phase - previousPhase
       // The loop seam goes from 3 back to 0, not across the whole timeline.
       if (delta > 1.5) delta -= 3
@@ -1379,6 +1530,12 @@ function SoundToggle() {
       if (document.hidden) { stopNetwork(); void current.suspend() }
       else void current.resume().catch(() => setError(true))
     }
+    // iOS can interrupt audio independently of page visibility. Retry only on
+    // a genuine user gesture, while the visitor has opted in to sound.
+    const recoverAudio = () => {
+      const current = sound.current
+      if (current && !current.isRunning && !document.hidden) void current.resume().catch(() => setError(true))
+    }
     update()
     window.addEventListener('ore-ripple', crystal)
     window.addEventListener('ore-crystal-hover', crystal)
@@ -1386,6 +1543,7 @@ function SoundToggle() {
     window.addEventListener('pointerout', pointerLeave)
     window.addEventListener('blur', stopNetwork)
     window.addEventListener('scroll', transition, { passive: true })
+    window.addEventListener('pointerdown', recoverAudio, { passive: true })
     document.addEventListener('click', click)
     document.addEventListener('visibilitychange', visibility)
     return () => {
@@ -1398,6 +1556,7 @@ function SoundToggle() {
       window.removeEventListener('pointerout', pointerLeave)
       window.removeEventListener('blur', stopNetwork)
       window.removeEventListener('scroll', transition)
+      window.removeEventListener('pointerdown', recoverAudio)
       document.removeEventListener('click', click)
       document.removeEventListener('visibilitychange', visibility)
     }
@@ -1438,9 +1597,11 @@ function SoundToggle() {
 export function Experience() {
   useScrollProgress()
   const { reducedMotion, documentVisible } = useRenderPreferences()
+  useIdleJourney(reducedMotion)
+  const buttonAnchor = useRef<HTMLSpanElement>(null)
   return (
     <main>
-      <div className="webgl-shell" aria-hidden="true"><CanvasBoundary><SignalCanvas reducedMotion={reducedMotion} documentVisible={documentVisible} /></CanvasBoundary></div>
+      <div className="webgl-shell" aria-hidden="true"><CanvasBoundary><SignalCanvas reducedMotion={reducedMotion} documentVisible={documentVisible} buttonAnchor={buttonAnchor} /></CanvasBoundary></div>
       <header className="chrome">
         <a className="brand" href="#signal" aria-label="Claude Expert home">claude<span>.expert</span></a>
         <div className="chrome-controls">
@@ -1460,23 +1621,37 @@ export function Experience() {
         <p>Mind</p>
         <div><RainHeadline lines={['When applied', 'it becomes Value']} /><span className="mind-caption">Connecting the right dots</span></div>
       </section>
-      <PotentialChapter id="potential" />
+      <PotentialChapter id="potential" buttonAnchor={buttonAnchor} />
       <SignalChapter id="loop" hidden />
     </main>
   )
 }
 
-function RainHeadline({ lines, hero = false }: { lines: string[]; hero?: boolean }) {
+function RainHeadline({ lines, hero = false, onReveal }: { lines: string[]; hero?: boolean; onReveal?: () => void }) {
+  const heading = useRef<HTMLHeadingElement>(null)
+  const [revealed, setRevealed] = useState(false)
+  useEffect(() => {
+    const element = heading.current
+    if (!element) return
+    const reveal = () => { setRevealed(true); onReveal?.() }
+    if (!('IntersectionObserver' in window)) { reveal(); return }
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) { reveal(); observer.disconnect() }
+    }, { threshold: 0.2 })
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [onReveal])
   const rainLetters = (text: string, offset: number) => [...text].map((letter, index) => {
     if (letter === ' ') return <span key={index} className="rain-space">&nbsp;</span>
     const sequence = offset + index
-    return <span key={index} className="rain-letter" style={{ '--glyph-delay': `${-((sequence * 0.61) % 7)}s` } as CSSProperties}>
-      <span>{letter}</span>
+    return <span key={index} className="rain-letter" data-letter={letter} style={{ '--glyph-delay': `${-((sequence * 0.61) % 7)}s`, '--reveal-delay': `${sequence * 65}ms`, '--neural-delay': `${Math.floor(sequence / 3) * 115 + (sequence % 3) * 20}ms`, '--exit-delay': `${(sequence % 7) * 35}ms`, '--shard-direction': sequence % 2 ? '-1' : '1' } as CSSProperties}>
+      <span className="rain-resolved"><span>{letter}</span></span>
     </span>
   })
-  const content = <span aria-hidden="true">{lines.map((line, index) => <span key={index} className="rain-line">{rainLetters(line, index * 9)}</span>)}</span>
+  const content = <span aria-hidden="true">{lines.map((line, index) => <span key={index} className="rain-line">{rainLetters(line, lines.slice(0, index).reduce((sum, previous) => sum + [...previous].length + 1, 0))}</span>)}</span>
   const label = lines.join(' ')
-  return hero ? <h1 className="rain-headline" aria-label={label}>{content}</h1> : <h2 className="rain-headline" aria-label={label}>{content}</h2>
+  const className = `rain-headline ${hero ? 'headline-fall' : onReveal ? 'headline-crystal' : 'headline-neural'} ${revealed ? 'is-revealed' : 'is-waiting'}`
+  return hero ? <h1 ref={heading} className={className} aria-label={label}>{content}</h1> : <h2 ref={heading} className={className} aria-label={label}>{content}</h2>
 }
 
 // Chapter one, rendered twice: once at the top and once after chapter three as the seam for the infinite loop.
@@ -1494,11 +1669,13 @@ function SignalChapter({ id, hidden = false }: { id: string; hidden?: boolean })
 }
 
 // Chapter three, rendered twice: once in place and once above chapter one as the seam for scrolling upward.
-function PotentialChapter({ id, hidden = false }: { id: string; hidden?: boolean }) {
+function PotentialChapter({ id, hidden = false, buttonAnchor }: { id: string; hidden?: boolean; buttonAnchor?: RefObject<HTMLSpanElement | null> }) {
+  const [titleRevealed, setTitleRevealed] = useState(false)
+  const revealTitle = useMemo(() => () => setTitleRevealed(true), [])
   return (
       <section id={id} className="chapter potential" aria-label={hidden ? undefined : 'Chapter three: Potential'} aria-hidden={hidden || undefined} inert={hidden || undefined}>
         <p>Potential</p>
-        <div className="potential-copy"><RainHeadline lines={['Crystalize']} /><p className="ore-note">Learn how to make websites like this</p><a className="cta" href="https://claude-expert.pages.dev/"><span className="cta-sweep" aria-hidden="true" /><span className="cta-glyphs" aria-hidden="true">ᚫ ⊹ ᛟ ⌁</span><span className="cta-label">become claude.expert</span><span className="cta-arrow" aria-hidden="true">↗</span></a></div>
+        <div className="potential-copy"><RainHeadline lines={['Learn how to', 'build this', 'in 5 days']} onReveal={revealTitle} /><span ref={buttonAnchor} className="cta-anchor"><a className={`cta ${titleRevealed ? 'cta-arriving' : 'cta-waiting'}`} href="https://claude-expert.pages.dev/"><span className="cta-sweep" aria-hidden="true" /><span className="cta-glyphs" aria-hidden="true">ᚫ ⊹ ᛟ ⌁</span><span className="cta-label">become claude.expert</span><span className="cta-arrow" aria-hidden="true">↗︎</span></a></span></div>
       </section>
   )
 }
