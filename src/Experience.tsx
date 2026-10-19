@@ -776,7 +776,8 @@ type OreScanUniforms = {
 }
 
 const ORE_RIPPLE_COUNT = 12
-const ORE_RIPPLE_LIFETIME = 3.7
+const ORE_RIPPLE_LIFETIME = 2.1
+const ORE_RIPPLE_SPACING = 48 // CSS pixels travelled between waves
 
 // A fine triangular surface lattice and expanding pulse follow the real
 // raycast hit, rather than being projected onto a sphere around the ore.
@@ -810,9 +811,11 @@ function configureOreScan(shader: THREE.WebGLProgramParametersWithUniforms, unif
       float pulse = 0.0;
       for (int i = 0; i < 12; i++) {
         float age = uScans[i].w;
-        float scanDistance = distance(vScanWorld, uScans[i].xyz);
-        float fade = smoothstep(0.0, 0.18, age) * (1.0 - smoothstep(0.37, ${ORE_RIPPLE_LIFETIME.toFixed(1)}, age));
-        float scanRadius = age * 0.42;
+        vec3 offset = abs(vScanWorld - uScans[i].xyz);
+        // A wider rectangular wavefront, with depth included so it follows the surface.
+        float scanDistance = max(max(offset.x / 1.35, offset.y), offset.z);
+        float fade = smoothstep(0.0, 0.08, age) * (1.0 - smoothstep(0.24, ${ORE_RIPPLE_LIFETIME.toFixed(1)}, age));
+        float scanRadius = age * 0.55;
         float ringDistance = (scanDistance - scanRadius) / 0.08;
         float ring = exp(-ringDistance * ringDistance);
         pulse = max(pulse, ring * fade);
@@ -825,7 +828,7 @@ function configureOreScan(shader: THREE.WebGLProgramParametersWithUniforms, unif
       float lattice = scanGrid(scanCoord.yz) * scanWeights.x
                     + scanGrid(scanCoord.xz) * scanWeights.y
                     + scanGrid(scanCoord.xy) * scanWeights.z;
-      totalEmissiveRadiance += vec3(1.0, 0.34, 0.08) * uScanStrength
+      totalEmissiveRadiance += vec3(0.72, 0.82, 0.90) * uScanStrength
         * lattice * (scanArea * 0.12 + pulse * 0.72);`)
 }
 
@@ -910,7 +913,7 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
   const hit = useRef(false)
   const mouse = useRef(new THREE.Vector2(9, 9))
   const pointerKind = useRef('mouse')
-  const scanState = useRef({ pointerRevision: 0, emittedRevision: 0, next: 0, lastEmission: -1, lastMotion: -1 })
+  const scanState = useRef({ pointerRevision: 0, emittedRevision: 0, next: 0, lastEmission: -1, lastMotion: -1, distance: 0, pointerX: 0, pointerY: 0, hasPointer: false })
   // Drag-to-rotate: accumulated user spin plus a velocity that decays for a little inertia after release.
   const drag = useRef({ active: false, x: 0, y: 0 })
   const spin = useRef(new THREE.Vector2())
@@ -1020,6 +1023,11 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
   useEffect(() => {
     // The canvas ignores pointer events (content sits above it), so track the cursor and drags on the window.
     const move = (e: PointerEvent) => {
+      const scan = scanState.current
+      if (hit.current && scan.hasPointer && e.pointerType !== 'touch') scan.distance += Math.hypot(e.clientX - scan.pointerX, e.clientY - scan.pointerY)
+      scan.pointerX = e.clientX
+      scan.pointerY = e.clientY
+      scan.hasPointer = true
       mouse.current.set((e.clientX / window.innerWidth) * 2 - 1, -(e.clientY / window.innerHeight) * 2 + 1)
       pointerKind.current = e.pointerType
       scanState.current.pointerRevision += 1
@@ -1046,12 +1054,20 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
       drag.current.active = false
       document.body.style.cursor = hit.current ? 'grab' : ''
     }
+    const leave = (e: PointerEvent) => {
+      if (!e.relatedTarget) mouse.current.set(100, 100)
+    }
+    const blur = () => { mouse.current.set(100, 100) }
     window.addEventListener('pointermove', move, { passive: true })
+    window.addEventListener('pointerout', leave)
+    window.addEventListener('blur', blur)
     window.addEventListener('pointerdown', down)
     window.addEventListener('pointerup', up)
     window.addEventListener('pointercancel', up)
     return () => {
       window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerout', leave)
+      window.removeEventListener('blur', blur)
       window.removeEventListener('pointerdown', down)
       window.removeEventListener('pointerup', up)
       window.removeEventListener('pointercancel', up)
@@ -1097,7 +1113,10 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
       const intersections = phase >= 1.9 && visible > 0.5 ? raycaster.intersectObject(group.current, true) : []
       hit.current = intersections.length > 0
       if (hit.current && !wasHit && pointerKind.current !== 'touch') window.dispatchEvent(new Event('ore-crystal-hover'))
+      if (!hit.current && wasHit) window.dispatchEvent(new Event('ore-crystal-leave'))
       const scan = scanState.current
+      if (hit.current && !wasHit) scan.distance = ORE_RIPPLE_SPACING
+      if (!hit.current && wasHit) scan.distance = 0
       if (hit.current) {
         group.current.updateWorldMatrix(true, false)
         scanTarget.copy(intersections[0].point)
@@ -1107,7 +1126,7 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
         else scanSmoothed.lerp(scanTarget, 1 - Math.exp(-Math.min(delta, 0.1) * 16))
       }
       if (hit.current && !reducedMotion && pointerKind.current !== 'touch'
-        && scan.pointerRevision !== scan.emittedRevision && now - scan.lastMotion < 0.3 && now - scan.lastEmission >= 0.3) {
+        && scan.distance >= ORE_RIPPLE_SPACING && scan.pointerRevision !== scan.emittedRevision && now - scan.lastMotion < 0.3 && now - scan.lastEmission >= 0.3) {
         // Never reuse an active ripple: if the pool is full, wait for one to
         // finish instead of cutting a travelling wave short.
         for (let offset = 0; offset < scanOrigins.length; offset += 1) {
@@ -1118,6 +1137,7 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
           scan.next = (slot + 1) % scanOrigins.length
           scan.lastEmission = now
           scan.emittedRevision = scan.pointerRevision
+          scan.distance = 0
           window.dispatchEvent(new Event('ore-ripple'))
           break
         }
@@ -1477,6 +1497,8 @@ function SoundToggle() {
     const music = window.setInterval(() => sound.current?.note(chapterPhase()), 1700)
     const ambience = window.setInterval(update, 250)
     const crystal = () => sound.current?.cue('crystal')
+    const asteroidEnter = () => sound.current?.asteroidHover(true)
+    const asteroidLeave = () => sound.current?.asteroidHover(false)
     let lastPointer: { x: number; y: number; time: number } | null = null
     let lastNetworkMotion = 0
     const networkMove = (event: PointerEvent) => {
@@ -1535,7 +1557,7 @@ function SoundToggle() {
     const visibility = () => {
       const current = sound.current
       if (!current) return
-      if (document.hidden) { stopNetwork(); void current.suspend() }
+      if (document.hidden) { stopNetwork(); asteroidLeave(); void current.suspend() }
       else void current.resume().catch(() => setError(true))
     }
     // iOS can interrupt audio independently of page visibility. Retry only on
@@ -1547,9 +1569,12 @@ function SoundToggle() {
     update()
     window.addEventListener('ore-ripple', crystal)
     window.addEventListener('ore-crystal-hover', crystal)
+    window.addEventListener('ore-crystal-hover', asteroidEnter)
+    window.addEventListener('ore-crystal-leave', asteroidLeave)
     window.addEventListener('pointermove', networkMove, { passive: true })
     window.addEventListener('pointerout', pointerLeave)
     window.addEventListener('blur', stopNetwork)
+    window.addEventListener('blur', asteroidLeave)
     window.addEventListener('scroll', transition, { passive: true })
     window.addEventListener('pointerdown', recoverAudio, { passive: true })
     document.addEventListener('click', click)
@@ -1560,9 +1585,12 @@ function SoundToggle() {
       window.clearInterval(networkIdle)
       window.removeEventListener('ore-ripple', crystal)
       window.removeEventListener('ore-crystal-hover', crystal)
+      window.removeEventListener('ore-crystal-hover', asteroidEnter)
+      window.removeEventListener('ore-crystal-leave', asteroidLeave)
       window.removeEventListener('pointermove', networkMove)
       window.removeEventListener('pointerout', pointerLeave)
       window.removeEventListener('blur', stopNetwork)
+      window.removeEventListener('blur', asteroidLeave)
       window.removeEventListener('scroll', transition)
       window.removeEventListener('pointerdown', recoverAudio)
       document.removeEventListener('click', click)

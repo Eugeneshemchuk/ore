@@ -9,8 +9,10 @@ export class Soundscape {
   private readonly networkAir = this.context.createGain()
   private readonly glyphSampleGain = this.context.createGain()
   private readonly neuralSampleGain = this.context.createGain()
+  private readonly asteroidHumGain = this.context.createGain()
   private glyphSample: AudioBufferSourceNode | null = null
   private neuralSample: AudioBufferSourceNode | null = null
+  private asteroidHum: AudioBufferSourceNode | null = null
   private crystalZoomBuffer: AudioBuffer | null = null
   private readonly voices: OscillatorNode[] = []
   private readonly noise: AudioBufferSourceNode
@@ -66,6 +68,8 @@ export class Soundscape {
     this.glyphSampleGain.connect(this.master)
     this.neuralSampleGain.gain.value = 0
     this.neuralSampleGain.connect(this.master)
+    this.asteroidHumGain.gain.value = 0
+    this.asteroidHumGain.connect(this.master)
     this.noise.start()
   }
 
@@ -79,6 +83,28 @@ export class Soundscape {
     void this.loadGlyphSample()
     void this.loadNeuralSample()
     void this.loadCrystalZoomSample()
+    void this.loadAsteroidHum()
+  }
+
+  private async loadAsteroidHum() {
+    try {
+      const response = await fetch(`${import.meta.env.BASE_URL}audio/asteroid-hum.mp3`)
+      if (!response.ok) throw new Error('Asteroid audio unavailable')
+      const buffer = await this.context.decodeAudioData(await response.arrayBuffer())
+      if (this.context.state === 'closed') return
+      const source = this.context.createBufferSource()
+      source.buffer = buffer
+      source.loop = true
+      source.connect(this.asteroidHumGain)
+      source.start()
+      this.asteroidHum = source
+    } catch {
+      // Other sounds remain available if the hover recording cannot load.
+    }
+  }
+
+  asteroidHover(active: boolean) {
+    this.asteroidHumGain.gain.setTargetAtTime(active ? 0.12 : 0, this.context.currentTime, active ? 0.2 : 0.35)
   }
 
   private async loadCrystalZoomSample() {
@@ -253,6 +279,7 @@ export class Soundscape {
     this.noise.stop()
     this.glyphSample?.stop()
     this.neuralSample?.stop()
+    this.asteroidHum?.stop()
     await this.context.close()
   }
 }
