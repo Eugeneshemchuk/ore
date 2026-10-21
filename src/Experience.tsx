@@ -531,6 +531,7 @@ function configureRepulsion(shader: THREE.WebGLProgramParametersWithUniforms, un
 function RepulsionController({ uniforms, reducedMotion }: { uniforms: RepulsionUniforms; reducedMotion: boolean }) {
   const target = useRef(new THREE.Vector2(0, 0))
   const active = useRef(false)
+  const potentialTime = useRef(0)
   const { size } = useThree()
   useEffect(() => {
     const move = (event: PointerEvent) => {
@@ -555,7 +556,11 @@ function RepulsionController({ uniforms, reducedMotion }: { uniforms: RepulsionU
     uniforms.uRepelAspect.value = size.width / Math.max(1, size.height)
     const phase = chapterPhase()
     const mindChapter = phase > 1.98 && phase < 2.96
-    const sceneStrength = THREE.MathUtils.smoothstep(signalDeparture(phase), 0.65, 0.95)
+    // After Mind, the hollow around the cursor waits a beat and then grows in
+    // over a few seconds instead of snapping on at full strength.
+    potentialTime.current = phase >= 2.96 ? potentialTime.current + Math.min(delta, 0.1) : 0
+    const potentialRamp = phase >= 2.96 ? THREE.MathUtils.smoothstep(potentialTime.current, 0.9, 3.6) : 1
+    const sceneStrength = THREE.MathUtils.smoothstep(signalDeparture(phase), 0.65, 0.95) * potentialRamp
     // Mind responds as a soft local illumination, not a force that creates a
     // black-hole-like gap in the neural field.
     const desired = active.current && !reducedMotion && !mindChapter ? sceneStrength : 0
