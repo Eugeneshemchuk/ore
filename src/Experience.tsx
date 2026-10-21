@@ -25,6 +25,17 @@ function rawChapterPhase() {
   return 3 + (y - potential) / Math.max(1, period - potential)
 }
 
+// Potential: a flight through open space (3.02–3.40) where the asteroid
+// surfaces far ahead, then the approach (3.40–3.78) that carries the
+// specimen's close-up animation. Those beats were authored for an approach
+// over 3.02–3.66, so oreBeat maps the new approach window onto that range.
+const ORE_Z = -34
+const ORE_JOURNEY_END = 3.4
+const ORE_APPROACH_END = 3.78
+function oreBeat(phase: number) {
+  return 3.02 + (phase - ORE_JOURNEY_END) * (0.64 / (ORE_APPROACH_END - ORE_JOURNEY_END))
+}
+
 // A single eased timeline keeps all WebGL layers in step, including at the loop seam.
 let visualPhase: number | null = null
 function chapterPhase() {
@@ -188,7 +199,7 @@ function MaskedInteractionTrails({ motion, reducedMotion }: { motion: RefObject<
     composite.uniforms.uPointer.value.copy(motion.current.pointer)
     composite.uniforms.uAspect.value = size.width / Math.max(size.height, 1)
     composite.uniforms.uMask.value = trailStrength.current
-    composite.uniforms.uPotential.value = phase > 2.72 && phase < 3.56 ? 1 : 0
+    composite.uniforms.uPotential.value = phase > 2.72 && oreBeat(phase) < 3.56 ? 1 : 0
     gl.setRenderTarget(currentTargets.write)
     gl.clear()
     gl.render(screenScene, screenCamera)
@@ -212,8 +223,9 @@ function loopProgress() {
 }
 
 // The same bridge runs backwards at the loop seam, connecting signal directly to crystal.
+// It is held back until the asteroid close-up ends, so the flight stays clear space.
 function signalDeparture(phase: number) {
-  return phase < 1 ? phase : phase > 3 ? 4 - phase : 1
+  return phase < 1 ? phase : phase > 3.8 ? (4 - phase) / 0.2 : 1
 }
 
 const rainVertexShader = /* glsl */ `
@@ -729,6 +741,7 @@ function CosmicParticles({ repulsion }: { repulsion: RepulsionUniforms }) {
   const material = useRef<THREE.PointsMaterial>(null)
   const mindField = useRef<THREE.Points>(null)
   const mindMaterial = useRef<THREE.PointsMaterial>(null)
+  const laneMaterial = useRef<THREE.PointsMaterial>(null)
   // The camera flies through this dust, so cap each point's size and draw it
   // as a disc; otherwise nearby specks swell into flat grey squares.
   const dustShader = useMemo(() => (shader: THREE.WebGLProgramParametersWithUniforms) => {
@@ -762,8 +775,25 @@ function CosmicParticles({ repulsion }: { repulsion: RepulsionUniforms }) {
     result.setAttribute('position', new THREE.BufferAttribute(positions, 3))
     return result
   }, [mobile])
+  // Stars along the flight from the brain to the asteroid, kept clear of the
+  // camera's path; the fog makes them surface ahead and stream past.
+  const laneGeometry = useMemo(() => {
+    const count = mobile ? 500 : 1400
+    const positions = new Float32Array(count * 3)
+    for (let i = 0; i < count; i += 1) {
+      const angle = Math.random() * Math.PI * 2
+      const radius = 0.7 + Math.pow(Math.random(), 0.7) * 6.5
+      positions[i * 3] = Math.cos(angle) * radius
+      positions[i * 3 + 1] = 1.3 + Math.sin(angle) * radius * 0.7
+      positions[i * 3 + 2] = -6 + Math.random() * (ORE_Z + 2)
+    }
+    const result = new THREE.BufferGeometry()
+    result.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    return result
+  }, [mobile])
   useEffect(() => () => geometry.dispose(), [geometry])
   useEffect(() => () => mindGeometry.dispose(), [mindGeometry])
+  useEffect(() => () => laneGeometry.dispose(), [laneGeometry])
   useFrame(({ clock }) => {
     const p = loopProgress()
     if (field.current) {
@@ -775,6 +805,7 @@ function CosmicParticles({ repulsion }: { repulsion: RepulsionUniforms }) {
     const networkMask = 1 - THREE.MathUtils.smoothstep(phase, 1.55, 1.9) * (1 - THREE.MathUtils.smoothstep(phase, 2.9, 3.12))
     if (material.current) material.current.opacity = (0.14 + THREE.MathUtils.smoothstep(p, 0.52, 0.88) * 0.42) * networkMask
     if (mindMaterial.current) mindMaterial.current.opacity = 0.42 * THREE.MathUtils.smoothstep(phase, 1.55, 1.9) * (1 - THREE.MathUtils.smoothstep(phase, 2.9, 3.12))
+    if (laneMaterial.current) laneMaterial.current.opacity = 0.7 * THREE.MathUtils.smoothstep(phase, 2.92, 3.04) * (1 - THREE.MathUtils.smoothstep(phase, 3.79, 3.87))
   })
   return <>
     <points ref={field} geometry={geometry}>
@@ -782,6 +813,9 @@ function CosmicParticles({ repulsion }: { repulsion: RepulsionUniforms }) {
     </points>
     <points ref={mindField} geometry={mindGeometry}>
       <pointsMaterial ref={mindMaterial} color="#d7e2e2" size={0.03} sizeAttenuation transparent opacity={0} depthWrite={false} onBeforeCompile={dustShader} />
+    </points>
+    <points geometry={laneGeometry} frustumCulled={false}>
+      <pointsMaterial ref={laneMaterial} color="#d7e2e2" size={0.032} sizeAttenuation transparent opacity={0} depthWrite={false} onBeforeCompile={dustShader} />
     </points>
   </>
 }
@@ -1301,10 +1335,12 @@ function ParticleSwarm({ motion, reducedMotion }: { motion: RefObject<SwarmMotio
     const phase = chapterPhase()
     // Potential uses a compact cursor sphere so the interaction stays on the
     // specimen rather than opening across most of the frame.
-    live.uRepelRadius.value = phase > 2.7 && phase < 3.58 ? 0.45 : 1
-    live.uOpacity.value = THREE.MathUtils.smoothstep(phase, 3.12, 3.36) * (1 - THREE.MathUtils.smoothstep(phase, 3.53, 3.97))
+    live.uRepelRadius.value = phase > 2.7 && oreBeat(phase) < 3.58 ? 0.45 : 1
+    const beat = oreBeat(phase)
+    live.uOpacity.value = THREE.MathUtils.smoothstep(beat, 3.12, 3.36) * (1 - THREE.MathUtils.smoothstep(phase, 3.79, 3.87))
   })
-  return <points geometry={geometry} frustumCulled={false}>
+  // Only Potential shows this field, so it surrounds the asteroid.
+  return <points geometry={geometry} frustumCulled={false} position={[0, 1.1, ORE_Z + 2]}>
     <shaderMaterial ref={material} transparent depthWrite={false} blending={THREE.AdditiveBlending} uniforms={uniforms} vertexShader={/* glsl */ `
       attribute float aSeed;
       uniform float uTime, uSwirl, uEnergy, uRepel, uRepelRadius, uAspect, uDpr;
@@ -1374,8 +1410,8 @@ function CrystalParticleAura({ reducedMotion }: { reducedMotion: boolean }) {
   useFrame(({ clock }) => {
     if (!material.current) return
     const phase = chapterPhase()
-    const entering = THREE.MathUtils.smoothstep(phase, 3.14, 3.36)
-    const leaving = 1 - THREE.MathUtils.smoothstep(phase, 3.54, 3.94)
+    const entering = THREE.MathUtils.smoothstep(oreBeat(phase), 3.14, 3.36)
+    const leaving = 1 - THREE.MathUtils.smoothstep(oreBeat(phase), 3.54, 3.94)
     material.current.uniforms.uTime.value = reducedMotion ? 0 : clock.getElapsedTime()
     material.current.uniforms.uDpr.value = gl.getPixelRatio()
     material.current.uniforms.uOpacity.value = entering * leaving * (mobile ? 0.58 : 0.76)
@@ -1431,8 +1467,11 @@ function CameraDirector({ reducedMotion, oreGroup, motion }: { reducedMotion: bo
   const mindInnerPosition = useMemo(() => new THREE.Vector3(-0.14, 1.62, -2.65), [])
   const mindCrossPosition = useMemo(() => new THREE.Vector3(0.16, 1.54, -4.82), [])
   const mindExitPosition = useMemo(() => new THREE.Vector3(-0.16, 1.32, -7.55), [])
-  const asteroidDistantPosition = useMemo(() => new THREE.Vector3(-0.06, 1.32, -7.62), [])
-  const asteroidNearPosition = useMemo(() => new THREE.Vector3(0.48, 1.06, -17.66), [])
+  // Open space ahead of the brain: the asteroid is a small far shape here.
+  const asteroidDistantPosition = useMemo(() => new THREE.Vector3(-0.06, 1.3, ORE_Z + 18), [])
+  const asteroidNearPosition = useMemo(() => new THREE.Vector3(0.48, 1.06, ORE_Z + 1.84), [])
+  // Reduced motion skips the flight and holds the inspectable view.
+  const asteroidViewPosition = useMemo(() => new THREE.Vector3(-0.06, 1.32, ORE_Z + 6.9), [])
   const signalPosition = useMemo(() => new THREE.Vector3(0, 0, 6.3), [])
   const signalLook = useMemo(() => new THREE.Vector3(0, 0, 0), [])
   const voidLook = useMemo(() => new THREE.Vector3(0, 0, -5.8), [])
@@ -1441,8 +1480,8 @@ function CameraDirector({ reducedMotion, oreGroup, motion }: { reducedMotion: bo
   const mindApproachLook = useMemo(() => new THREE.Vector3(0.02, 1.6, -4.72), [])
   const mindInnerLook = useMemo(() => new THREE.Vector3(-0.08, 1.58, -5.0), [])
   const mindCrossLook = useMemo(() => new THREE.Vector3(0.12, 1.48, -5.7), [])
-  const mindExitLook = useMemo(() => new THREE.Vector3(0.42, 1.12, -19.5), [])
-  const oreLook = useMemo(() => new THREE.Vector3(0.42, 1.12, -19.5), [])
+  const mindExitLook = useMemo(() => new THREE.Vector3(0.42, 1.12, ORE_Z), [])
+  const oreLook = useMemo(() => new THREE.Vector3(0.42, 1.12, ORE_Z), [])
   const oreCenter = useMemo(() => new THREE.Vector3(), [])
   useFrame(({ clock }, delta) => {
     const phase = chapterPhase()
@@ -1452,7 +1491,7 @@ function CameraDirector({ reducedMotion, oreGroup, motion }: { reducedMotion: bo
     const transitionMind = THREE.MathUtils.smoothstep(phase, 2.08, 2.32)
     const transitionOre = THREE.MathUtils.smoothstep(phase, 3.0, 3.14)
     const returnToSignal = THREE.MathUtils.smoothstep(phase, 3.82, 4)
-    targetPosition.current.copy(signalPosition).lerp(voidPosition, transitionVoid).lerp(mindPosition, transitionMind).lerp(asteroidDistantPosition, transitionOre).lerp(signalPosition, returnToSignal)
+    targetPosition.current.copy(signalPosition).lerp(voidPosition, transitionVoid).lerp(mindPosition, transitionMind).lerp(asteroidViewPosition, transitionOre).lerp(signalPosition, returnToSignal)
     targetLook.current.copy(signalLook).lerp(voidLook, transitionVoid).lerp(mindLook, transitionMind).lerp(oreLook, transitionOre).lerp(signalLook, returnToSignal)
     targetPosition.current.lerp(facePosition, faceFocus)
     targetLook.current.lerp(faceLook, faceFocus)
@@ -1481,11 +1520,12 @@ function CameraDirector({ reducedMotion, oreGroup, motion }: { reducedMotion: bo
       }
       let closeUp = 0
       if (phase >= 3 && phase < 3.82 && oreGroup.current) {
-        // The asteroid begins as a small far object. Scroll advances the
-        // camera toward its real rotating world position until it fills frame.
+        // Fly on through open space until the asteroid surfaces far ahead,
+        // then close in on its real rotating world position until it fills frame.
         oreGroup.current.getWorldPosition(oreCenter)
-        const oreCloseUp = THREE.MathUtils.smoothstep(phase, 3.02, 3.66)
-        targetPosition.current.copy(asteroidDistantPosition).lerp(asteroidNearPosition, oreCloseUp)
+        const journey = THREE.MathUtils.smoothstep(phase, 3.02, ORE_JOURNEY_END)
+        const oreCloseUp = THREE.MathUtils.smoothstep(phase, ORE_JOURNEY_END, ORE_APPROACH_END)
+        targetPosition.current.copy(mindExitPosition).lerp(asteroidDistantPosition, journey).lerp(asteroidNearPosition, oreCloseUp)
         targetLook.current.copy(oreLook).lerp(oreCenter, 0.72)
         closeUp = oreCloseUp
       }
@@ -1495,7 +1535,7 @@ function CameraDirector({ reducedMotion, oreGroup, motion }: { reducedMotion: bo
       // camera aimed near it. Different position/look offsets create depth
       // instead of simply sliding the entire composition across the screen.
       const voidParallax = THREE.MathUtils.smoothstep(phase, 0.62, 1.08) * (1 - THREE.MathUtils.smoothstep(phase, 1.78, 2.05))
-      const oreParallax = THREE.MathUtils.smoothstep(phase, 3.02, 3.32) * (1 - returnToSignal)
+      const oreParallax = THREE.MathUtils.smoothstep(oreBeat(phase), 3.02, 3.32) * (1 - returnToSignal)
       const voidTravel = THREE.MathUtils.smoothstep(phase, 0.74, 1.38)
         * (1 - THREE.MathUtils.smoothstep(phase, 1.36, 1.66)) * (1 - faceFocus)
       targetPosition.current.z -= voidTravel * 1.15
@@ -1856,12 +1896,14 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
   useFrame(({ clock, camera }, delta) => {
     const phase = chapterPhase()
     const p = Math.min(phase / 3, 1)
-    const visible = THREE.MathUtils.smoothstep(phase, 2.98, 3.16) * (1 - THREE.MathUtils.smoothstep(phase, 3.8, 3.98))
+    const beat = oreBeat(phase)
+    // Surfaces mid-flight, while still far ahead.
+    const visible = THREE.MathUtils.smoothstep(phase, 3.14, 3.34) * (1 - THREE.MathUtils.smoothstep(phase, 3.79, 3.87))
     const t = clock.getElapsedTime()
     if (glint.current) {
       // Peak at the closest point of the crystal-tip camera move, fading in
       // and out with scroll progress (including when scrolling backwards).
-      const sparkle = reducedMotion ? 0 : THREE.MathUtils.smoothstep(phase, 3.18, 3.28) * (1 - THREE.MathUtils.smoothstep(phase, 3.36, 3.48))
+      const sparkle = reducedMotion ? 0 : THREE.MathUtils.smoothstep(beat, 3.18, 3.28) * (1 - THREE.MathUtils.smoothstep(beat, 3.36, 3.48))
       const material = glint.current.material as THREE.SpriteMaterial
       material.opacity = sparkle * visible * 0.9
       glint.current.scale.setScalar(0.16 + sparkle * 0.14)
@@ -1874,16 +1916,16 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
         spinVelocity.current.multiplyScalar(0.94)
       }
       spin.current.x = THREE.MathUtils.clamp(spin.current.x, -1.2, 1.2)
-      const scrollTurn = reducedMotion ? 0 : THREE.MathUtils.smoothstep(phase, 3.04, 3.7)
+      const scrollTurn = reducedMotion ? 0 : THREE.MathUtils.smoothstep(beat, 3.04, 3.7)
       group.current.rotation.y = t * 0.12 + p * Math.PI * 1.5 + scrollTurn * Math.PI * 1.35 + spin.current.y
       group.current.rotation.x = 0.12 + Math.sin(t * 0.3) * 0.06 + (p - 0.8) * 0.4 + scrollTurn * 0.25 + spin.current.x
-      const revealDrift = reducedMotion ? 0 : THREE.MathUtils.smoothstep(phase, 3.06, 3.23) * (1 - THREE.MathUtils.smoothstep(phase, 3.34, 3.52))
+      const revealDrift = reducedMotion ? 0 : THREE.MathUtils.smoothstep(beat, 3.06, 3.23) * (1 - THREE.MathUtils.smoothstep(beat, 3.34, 3.52))
       outer.current.position.x = (mobile ? 0.32 : 0.48) - revealDrift * 0.18
       outer.current.position.y = 1.12 + Math.sin(t * 0.6) * 0.08
       outer.current.scale.setScalar((mobile ? 0.74 : 1.1) * (0.7 + visible * 0.3))
       raycaster.setFromCamera(mouse.current, camera)
       const wasHit = hit.current
-      const intersections = phase >= 3.08 && visible > 0.5 ? raycaster.intersectObject(group.current, true) : []
+      const intersections = beat >= 3.08 && visible > 0.5 ? raycaster.intersectObject(group.current, true) : []
       hit.current = intersections.length > 0
       if (hit.current && !wasHit && pointerKind.current !== 'touch') window.dispatchEvent(new Event('ore-crystal-hover'))
       if (!hit.current && wasHit) window.dispatchEvent(new Event('ore-crystal-leave'))
@@ -1942,15 +1984,15 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
   })
 
   const keep = (material: THREE.Material | null) => { if (material && !materials.current.includes(material)) materials.current.push(material) }
-  return <group ref={outer} position={[mobile ? 0.32 : 0.48, 1.12, -19.5]}>
+  return <group ref={outer} position={[mobile ? 0.32 : 0.48, 1.12, ORE_Z]}>
     <group ref={group}>
       <mesh geometry={scene.rock}>
-        <meshStandardMaterial ref={keep} color="#262827" envMap={envMap} envMapIntensity={0.35} roughness={0.94} metalness={0.08} onBeforeCompile={rockShader} flatShading transparent opacity={0} />
+        <meshStandardMaterial ref={keep} color="#262827" envMap={envMap} envMapIntensity={0.35} roughness={0.94} metalness={0.08} onBeforeCompile={rockShader} flatShading transparent opacity={0} fog={false} />
       </mesh>
       {scene.crystals.map((c, index) => <mesh key={index} geometry={c.geometry} position={c.position} quaternion={c.quaternion}>
-        <meshPhysicalMaterial ref={keep} color={c.tint} vertexColors envMap={envMap} envMapIntensity={1.4} metalness={0.08} roughness={0.12} ior={1.54} clearcoat={0.65} clearcoatRoughness={0.08} onBeforeCompile={crystalShader} flatShading depthWrite={false} transparent opacity={0} />
+        <meshPhysicalMaterial ref={keep} color={c.tint} vertexColors envMap={envMap} envMapIntensity={1.4} metalness={0.08} roughness={0.12} ior={1.54} clearcoat={0.65} clearcoatRoughness={0.08} onBeforeCompile={crystalShader} flatShading depthWrite={false} transparent opacity={0} fog={false} />
         {index < 3 && <sprite position={[0, c.height * 0.24, 0]} scale={[c.radius * 4, c.height * 0.9, 1]} raycast={() => null}>
-          <spriteMaterial ref={(material) => { if (material) crystalHalos.current[index] = material }} map={haloTexture} transparent opacity={0} depthWrite={false} blending={THREE.AdditiveBlending} />
+          <spriteMaterial ref={(material) => { if (material) crystalHalos.current[index] = material }} map={haloTexture} transparent opacity={0} depthWrite={false} blending={THREE.AdditiveBlending} fog={false} />
         </sprite>}
         {index === 0 && <object3D ref={crystalTip} position={[0, c.height / 2, 0]}>
           <sprite ref={glint} raycast={() => null} visible={false}>
@@ -1960,7 +2002,7 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
       </mesh>)}
       {scene.rubble.map((r, index) => <mesh key={index} position={r.position} scale={r.scale} rotation={[index, index * 2, 0]}>
         <dodecahedronGeometry args={[1, 0]} />
-        <meshStandardMaterial ref={(material) => { keep(material); if (material) rubbleMaterials.current[index] = material }} color="#4a4f52" roughness={0.9} metalness={0.3} flatShading transparent opacity={0} />
+        <meshStandardMaterial ref={(material) => { keep(material); if (material) rubbleMaterials.current[index] = material }} color="#4a4f52" roughness={0.9} metalness={0.3} flatShading transparent opacity={0} fog={false} />
       </mesh>)}
       <CrystalParticleAura reducedMotion={reducedMotion} />
     </group>
