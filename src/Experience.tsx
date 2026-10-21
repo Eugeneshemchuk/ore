@@ -2477,7 +2477,7 @@ export function Experience() {
       <SignalChapter id="signal" />
 
       <section id="void" className="chapter void" aria-label="Chapter two: Void">
-        <FloatingTitle className="title-void" index="02 · Void" enter={[1.62, 1.76]} exit={[1.98, 2.12]}>{(present) => <RainHeadline lines={['The architect behind this.', 'Claude Opus 5.5']} active={present} />}</FloatingTitle>
+        <FloatingTitle className="title-void" index="02 · Void" enter={[1.62, 1.76]} exit={[1.98, 2.12]}>{(present) => <RainHeadline lines={['The Architect', 'Opus 5.5']} active={present} />}</FloatingTitle>
       </section>
 
       <section id="mind" className="chapter mind" aria-label="Chapter three: Mind">
