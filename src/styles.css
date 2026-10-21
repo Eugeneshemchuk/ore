@@ -118,6 +118,9 @@ h1 em { color: #f06e4e; font-style: normal; }
   .title-panel { padding: 18px 20px 24px; }
   .title-index { text-align: center; margin-bottom: 14px; }
   .title-signal { padding-bottom: 16svh; }
+  /* Keep the mask, brain and asteroid clear: later cards sit low, above the chapter nav and CTA. */
+  .title-void, .title-mind, .title-potential { align-items: flex-end; padding: 0 16px 12svh; }
+  .title-potential { padding-bottom: 19svh; }
   .rain-headline { margin-inline: auto; text-align: center; font-size: clamp(16px, 4.2vw, 31px); }
   .deck, .mind-caption, .ore-note, .chapter-index, .scroll-prompt, .void > p, .void-copy { display: none; }
   .cta { min-height: 44px; }

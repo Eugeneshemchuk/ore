@@ -1099,7 +1099,10 @@ function VoidField({ motion, reducedMotion }: { motion: RefObject<SwarmMotion>; 
     const entering = THREE.MathUtils.smoothstep(phase, 0.42, 0.9)
     // Once poured into the brain, the particles stay part of it and leave
     // only together with the network's links.
-    const leaving = 1 - THREE.MathUtils.smoothstep(phase, 2.86, 3.06)
+    // With reduced motion the mask does not travel, so it simply fades out.
+    const leaving = reducedMotion
+      ? 1 - THREE.MathUtils.smoothstep(phase, 2.08, 2.36)
+      : 1 - THREE.MathUtils.smoothstep(phase, 2.86, 3.06)
     live.uTime.value = reducedMotion ? 0 : clock.getElapsedTime()
     live.uOpacity.value = entering * leaving
     live.uDpr.value = gl.getPixelRatio()
@@ -2473,16 +2476,19 @@ function SoundToggle() {
   }, [])
   useEffect(() => {
     if (!enabled || sound.current) return
+    // A touch only grants audio when it ends as a tap (not a scroll), so wait
+    // for pointerup and check that the browser registered the activation.
     const gesture = (event: Event) => {
       if (event.target instanceof Element && event.target.closest('.sound-toggle')) return
+      if (navigator.userActivation && !navigator.userActivation.isActive) return
       remove()
       void startSound()
     }
     const remove = () => {
-      window.removeEventListener('pointerdown', gesture)
+      window.removeEventListener('pointerup', gesture)
       window.removeEventListener('keydown', gesture)
     }
-    window.addEventListener('pointerdown', gesture, { passive: true })
+    window.addEventListener('pointerup', gesture, { passive: true })
     window.addEventListener('keydown', gesture)
     return remove
   }, [enabled, startSound])
