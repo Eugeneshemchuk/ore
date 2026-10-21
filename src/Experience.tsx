@@ -564,6 +564,8 @@ function NeuralNetwork({ group, repulsion, reducedMotion }: { group: RefObject<T
       // A broad cerebral silhouette: two asymmetric hemispheres, a clear
       // central fissure and a shallow, living depth. It borrows the reference
       // image's branching brain mass rather than reading as a round graph.
+      // The hemispheres lie horizontally, one above the other, scaled so the
+      // whole mass keeps its footprint in the crown.
       const lobeIndex = Math.floor(index / 2)
       const side = index % 2 === 0 ? -1 : 1
       const angle = lobeIndex * 2.3999632297
@@ -571,8 +573,8 @@ function NeuralNetwork({ group, repulsion, reducedMotion }: { group: RefObject<T
       const crown = 0.82 + Math.sin(angle * 1.7) * 0.18
       const lobeWidth = 0.24 + radius * (1.26 + Math.sin(lobeIndex * 2.7) * 0.13)
       return new THREE.Vector3(
-        side * lobeWidth * crown,
-        Math.sin(angle) * radius * 1.16 + (1 - radius) * 0.24,
+        (Math.sin(angle) * radius * 1.16 + (1 - radius) * 0.24) * 1.2,
+        side * lobeWidth * crown * 0.75,
         Math.cos(angle * 1.43) * radius * 0.76 + Math.sin(lobeIndex * 17.1) * 0.12,
       )
     }
@@ -1386,7 +1388,7 @@ function CrystalParticleAura({ reducedMotion }: { reducedMotion: boolean }) {
   const mobile = size.width < 720
   const material = useRef<THREE.ShaderMaterial>(null)
   const geometry = useMemo(() => {
-    const count = mobile ? 320 : 1200
+    const count = mobile ? 110 : 420
     const positions = new Float32Array(count * 3)
     const seeds = new Float32Array(count)
     const tones = new Float32Array(count)
