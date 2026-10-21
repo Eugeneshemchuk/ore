@@ -6,7 +6,8 @@ html { scroll-behavior: smooth; background: #070809; }
 body { margin: 0; min-width: 320px; background: #070809; -webkit-user-select: none; user-select: none; }
 a { color: inherit; text-decoration: none; }
 button { font: inherit; }
-.webgl-shell { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
+/* Size to the large viewport so the canvas never resizes as mobile browser bars collapse mid-scroll. */
+.webgl-shell { position: fixed; inset: 0 0 auto; height: 100vh; height: 100lvh; z-index: 0; pointer-events: none; }
 .webgl-shell canvas { width: 100% !important; height: 100% !important; }
 .canvas-fallback { width: 100%; height: 100%; background: radial-gradient(ellipse at 75% 55%, #24140e 0%, #0d0b0a 35%, #070809 75%); }
 .chrome { position: fixed; z-index: 3; top: 0; left: 0; right: 0; display: flex; align-items: center; justify-content: space-between; padding: 26px 34px; mix-blend-mode: screen; }

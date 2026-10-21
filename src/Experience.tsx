@@ -36,6 +36,37 @@ function oreBeat(phase: number) {
   return 3.02 + (phase - ORE_JOURNEY_END) * (0.64 / (ORE_APPROACH_END - ORE_JOURNEY_END))
 }
 
+// Monotone cubic (Fritsch–Carlson) through [phase, value] keys: speed eases
+// between keys instead of jumping, and never overshoots or runs backwards.
+function monotoneKeys(keys: [number, number][]) {
+  const n = keys.length
+  const slopes = keys.slice(1).map(([x, y], i) => (y - keys[i][1]) / (x - keys[i][0]))
+  const tangents = keys.map((_, i) => {
+    if (i === 0) return slopes[0]
+    if (i === n - 1) return slopes[n - 2]
+    const [a, b] = [slopes[i - 1], slopes[i]]
+    if (a * b <= 0) return 0
+    // Weighted harmonic mean of the neighbouring slopes, by segment length.
+    const before = keys[i][0] - keys[i - 1][0]
+    const after = keys[i + 1][0] - keys[i][0]
+    const w1 = 2 * after + before
+    const w2 = after + 2 * before
+    return (w1 + w2) / (w1 / a + w2 / b)
+  })
+  return (x: number) => {
+    if (x <= keys[0][0]) return keys[0][1]
+    if (x >= keys[n - 1][0]) return keys[n - 1][1]
+    const i = Math.max(0, keys.findIndex(([at]) => x < at) - 1)
+    const [x0, y0] = keys[i]
+    const [x1, y1] = keys[i + 1]
+    const h = x1 - x0
+    const t = (x - x0) / h
+    const t2 = t * t
+    const t3 = t2 * t
+    return (2 * t3 - 3 * t2 + 1) * y0 + (t3 - 2 * t2 + t) * h * tangents[i] + (-2 * t3 + 3 * t2) * y1 + (t3 - t2) * h * tangents[i + 1]
+  }
+}
+
 // A single eased timeline keeps all WebGL layers in step, including at the loop seam.
 let visualPhase: number | null = null
 function chapterPhase() {
@@ -1542,8 +1573,8 @@ function CameraDirector({ reducedMotion, oreGroup, motion }: { reducedMotion: bo
     // Linger beside the crystals for a short drift before swinging out past them.
     const lingerAt = closeAt + (passAt - closeAt) * 0.15
     // Scroll keys: open space until the asteroid surfaces, the approach, the close look, then on past it.
-    const keys: [number, number][] = [[3.02, 0], [ORE_JOURNEY_END, along(points[1])], [3.6, closeAt], [3.67, lingerAt], [3.74, passAt], [3.82, 1]]
-    return { curve, closeAt, lingerAt, passAt, keys }
+    const travelAt = monotoneKeys([[3.02, 0], [ORE_JOURNEY_END, along(points[1])], [3.6, closeAt], [3.67, lingerAt], [3.74, passAt], [3.82, 1]])
+    return { curve, closeAt, passAt, travelAt }
   }, [mindExitPosition])
   const passAhead = useMemo(() => new THREE.Vector3(), [])
   // Reduced motion skips the flight and holds the inspectable view.
@@ -1600,17 +1631,13 @@ function CameraDirector({ reducedMotion, oreGroup, motion }: { reducedMotion: bo
         // centre it for the close look, then turn the gaze forward so it
         // slides out of frame as we pass it.
         oreGroup.current.getWorldPosition(oreCenter)
-        const { curve, closeAt, lingerAt, passAt, keys } = asteroidPass
-        const leg = Math.max(0, keys.findIndex(([at]) => phase < at) - 1)
-        const [fromPhase, fromTravel] = keys[leg]
-        const [toPhase, toTravel] = keys[Math.min(leg + 1, keys.length - 1)]
-        const travel = phase >= keys[keys.length - 1][0] ? 1
-          : THREE.MathUtils.lerp(fromTravel, toTravel, THREE.MathUtils.clamp((phase - fromPhase) / (toPhase - fromPhase), 0, 1))
+        const { curve, closeAt, passAt, travelAt } = asteroidPass
+        const travel = THREE.MathUtils.clamp(travelAt(phase), 0, 1)
         curve.getPointAt(travel, targetPosition.current)
         curve.getPointAt(Math.min(1, travel + 0.08), passAhead)
         passAhead.z -= 6
         targetLook.current.copy(oreLook).lerp(oreCenter, THREE.MathUtils.lerp(0.72, 1, THREE.MathUtils.smoothstep(travel, closeAt - 0.12, closeAt)))
-          .lerp(passAhead, THREE.MathUtils.smoothstep(travel, lingerAt, passAt))
+          .lerp(passAhead, THREE.MathUtils.smoothstep(travel, closeAt, passAt))
         closeUp = THREE.MathUtils.smoothstep(phase, ORE_JOURNEY_END, ORE_APPROACH_END)
       }
       const pointer = motion.current.pointer
