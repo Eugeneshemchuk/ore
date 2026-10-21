@@ -1662,6 +1662,8 @@ function crystalGeometry(radius: number, height: number) {
 // metallic traces are deliberately sparse so the specimen remains mostly rock.
 type OreScanUniforms = {
   uScans: { value: THREE.Vector4[] }
+  uScanCursor: { value: THREE.Vector4 }
+  uScanTime: { value: number }
   uScanStrength: { value: number }
 }
 
@@ -1682,8 +1684,10 @@ function configureOreScan(shader: THREE.WebGLProgramParametersWithUniforms, unif
       varying vec3 vScanLocal;
       varying vec3 vScanNormal;
       uniform vec4 uScans[12];
+      uniform vec4 uScanCursor;
+      uniform float uScanTime;
       uniform float uScanStrength;
-      float scanGrid(vec2 p) {
+      float scanGrid(vec2 p, float thickness) {
         // Smoothly warp the lattice in both directions so its cells vary in
         // size and angle, without making the travelling ripples jitter.
         vec2 bend = vec2(
@@ -1694,34 +1698,53 @@ function configureOreScan(shader: THREE.WebGLProgramParametersWithUniforms, unif
         vec3 cell = abs(fract(vec3(p.x, p.y, p.x + p.y) + 0.5) - 0.5);
         float edge = min(cell.x, min(cell.y, cell.z));
         float width = max(fwidth(edge), 0.006);
-        return 1.0 - smoothstep(0.012, 0.012 + width, edge);
+        return 1.0 - smoothstep(thickness, thickness + width, edge);
       }`)
     .replace('#include <emissivemap_fragment>', `#include <emissivemap_fragment>
+      // A compact, upright ellipsoid follows the real hit point. Keeping
+      // the vertical axis longer makes the cursor scan read as a portrait
+      // ellipse on the mineral instead of a large spherical bloom.
+      vec3 scanShape = vec3(0.58, 1.12, 0.66);
       float scanArea = 0.0;
       float pulse = 0.0;
+      float front = 0.0;
       for (int i = 0; i < 12; i++) {
         float age = uScans[i].w;
-        vec3 offset = vScanWorld - uScans[i].xyz;
-        // A compact, upright ellipsoid follows the real hit point. Keeping
-        // the vertical axis longer makes the cursor scan read as a portrait
-        // ellipse on the mineral instead of a large spherical bloom.
-        float scanDistance = length(offset / vec3(0.58, 1.12, 0.66));
-        float fade = smoothstep(0.0, 0.08, age) * (1.0 - smoothstep(0.24, ${ORE_RIPPLE_LIFETIME.toFixed(1)}, age));
-        float scanRadius = age * 0.38;
-        float ringDistance = (scanDistance - scanRadius) / 0.06;
-        float ring = exp(-ringDistance * ringDistance);
-        pulse = max(pulse, ring * fade);
-        float reached = 1.0 - smoothstep(scanRadius, scanRadius + 0.12, scanDistance);
-        scanArea = max(scanArea, reached * fade * (1.0 - smoothstep(0.32, 0.82, scanDistance)));
+        float scanDistance = length((vScanWorld - uScans[i].xyz) / scanShape);
+        float life = age / ${ORE_RIPPLE_LIFETIME.toFixed(1)};
+        float fade = smoothstep(0.0, 0.05, age) * (1.0 - smoothstep(0.1, 0.75, life));
+        // Ease out: the wave leaves the cursor quickly, then settles as it
+        // spreads, widening and dimming like energy thinning over the rock.
+        float scanRadius = 0.46 * (1.0 - exp(-age * 2.6));
+        float width = mix(0.03, 0.06, clamp(life * 1.4, 0.0, 1.0));
+        float ringDistance = (scanDistance - scanRadius) / width;
+        // Crisp leading edge, softer wake behind it.
+        float ring = ringDistance > 0.0 ? exp(-ringDistance * ringDistance * 2.2) : exp(ringDistance * 2.6);
+        // Hard spatial fall-off keeps overlapping ripples from tiling the rock.
+        float energy = fade * (1.0 - smoothstep(0.12, 0.46, scanDistance));
+        pulse = max(pulse, ring * energy);
+        front = max(front, (ringDistance > -0.6 ? exp(-ringDistance * ringDistance * 3.0) : 0.0) * energy);
+        float reached = 1.0 - smoothstep(scanRadius - 0.04, scanRadius + 0.04, scanDistance);
+        scanArea = max(scanArea, reached * fade * (1.0 - smoothstep(0.06, 0.22, scanDistance)) * (1.0 - life));
       }
+      // A soft lens stays under the pointer while it rests on the rock, so
+      // the lattice eases in on hover instead of popping.
+      float cursorDistance = length((vScanWorld - uScanCursor.xyz) / scanShape);
+      float lens = uScanCursor.w * (1.0 - smoothstep(0.02, 0.16, cursorDistance));
+      // While hovered the lattice covers the whole rock and breathes, holding until the cursor leaves.
+      float cover = uScanCursor.w * (0.1056 + 0.048 * sin(uScanTime * 3.2));
       vec3 scanWeights = pow(abs(normalize(vScanNormal)), vec3(4.0));
       scanWeights /= max(scanWeights.x + scanWeights.y + scanWeights.z, 0.001);
       vec3 scanCoord = vScanLocal * 15.0;
-      float lattice = scanGrid(scanCoord.yz) * scanWeights.x
-                    + scanGrid(scanCoord.xz) * scanWeights.y
-                    + scanGrid(scanCoord.xy) * scanWeights.z;
-      totalEmissiveRadiance += vec3(0.72, 0.82, 0.90) * uScanStrength
-        * lattice * (scanArea * 0.12 + pulse * 0.72);`)
+      // Lines thicken slightly as the wavefront passes through them.
+      float thickness = 0.01 + front * 0.014;
+      float lattice = scanGrid(scanCoord.yz, thickness) * scanWeights.x
+                    + scanGrid(scanCoord.xz, thickness) * scanWeights.y
+                    + scanGrid(scanCoord.xy, thickness) * scanWeights.z;
+      // Cool steel-blue wake, near-white at the leading edge.
+      vec3 scanColor = mix(vec3(0.62, 0.76, 0.88), vec3(0.94, 0.97, 1.0), clamp(front, 0.0, 1.0));
+      totalEmissiveRadiance += scanColor * uScanStrength
+        * lattice * (cover + scanArea * 0.06 + lens * 0.16 + pulse * 0.75);`)
 }
 
 function configureRockMaterial(shader: THREE.WebGLProgramParametersWithUniforms, uniforms: OreScanUniforms) {
@@ -1823,6 +1846,8 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
   const scanWorld = useMemo(() => new THREE.Vector3(), [])
   const scanUniforms = useMemo<OreScanUniforms>(() => ({
     uScans: { value: Array.from({ length: ORE_RIPPLE_COUNT }, () => new THREE.Vector4(0, 0, 0, 10)) },
+    uScanCursor: { value: new THREE.Vector4() },
+    uScanTime: { value: 0 },
     uScanStrength: { value: 0 },
   }), [])
   const rockShader = useMemo(() => (shader: THREE.WebGLProgramParametersWithUniforms) => configureRockMaterial(shader, scanUniforms), [scanUniforms])
@@ -2048,6 +2073,13 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
         if (age < ORE_RIPPLE_LIFETIME) group.current.localToWorld(scanWorld)
         scanUniforms.uScans.value[i].set(scanWorld.x, scanWorld.y, scanWorld.z, age)
       }
+      // The resting lens eases in and out, and keeps its last spot while it fades.
+      const cursor = scanUniforms.uScanCursor.value
+      const lensTarget = hit.current && !reducedMotion && pointerKind.current !== 'touch' ? 1 : 0
+      const lensAmount = THREE.MathUtils.lerp(cursor.w, lensTarget, 1 - Math.exp(-Math.min(delta, 0.1) * (lensTarget ? 7 : 4)))
+      scanWorld.copy(scanSmoothed)
+      group.current.localToWorld(scanWorld)
+      cursor.set(scanWorld.x, scanWorld.y, scanWorld.z, lensAmount)
       const wasGrabbable = grabbable.current
       grabbable.current = false
       if (visible > 0.5 && pointerKind.current !== 'touch') {
@@ -2080,6 +2112,7 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
     if (oreKeyLight.current) oreKeyLight.current.intensity = THREE.MathUtils.lerp(7, 4.8, visible)
     if (oreRimLight.current) oreRimLight.current.intensity = 16 * visible
     scanUniforms.uScanStrength.value = reducedMotion || pointerKind.current === 'touch' ? 0 : visible
+    scanUniforms.uScanTime.value = clock.getElapsedTime()
   })
 
   const keep = (material: THREE.Material | null) => { if (material && !materials.current.includes(material)) materials.current.push(material) }
