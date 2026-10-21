@@ -1,5 +1,5 @@
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { Component, useMemo, useRef, useState, useEffect, type CSSProperties, type ReactNode, type RefObject } from 'react'
+import { Component, useCallback, useMemo, useRef, useState, useEffect, type CSSProperties, type ReactNode, type RefObject } from 'react'
 import * as THREE from 'three'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 import { Soundscape } from './sound'
@@ -2318,7 +2318,12 @@ function useRenderPreferences() {
 
 function SoundToggle() {
   const sound = useRef<Soundscape | null>(null)
-  const [enabled, setEnabled] = useState(false)
+  // Sound is on by default unless the visitor turned it off on an earlier
+  // visit. Browsers only allow audio after a click, tap or key press, so the
+  // soundscape starts on the first such gesture.
+  const [enabled, setEnabled] = useState(() => {
+    try { return localStorage.getItem('ore-sound') !== 'off' } catch { return true }
+  })
   const [starting, setStarting] = useState(false)
   const [error, setError] = useState(false)
   const [showSoundHint, setShowSoundHint] = useState(true)
@@ -2448,28 +2453,52 @@ function SoundToggle() {
     }
   }, [enabled])
 
+  const startSound = useCallback(async () => {
+    if (sound.current) return
+    setStarting(true)
+    let current: Soundscape | null = null
+    try {
+      current = new Soundscape()
+      sound.current = current
+      await current.start()
+      setEnabled(true)
+    } catch {
+      if (current) void current.close()
+      sound.current = null
+      setEnabled(false)
+      setError(true)
+    } finally {
+      setStarting(false)
+    }
+  }, [])
+  useEffect(() => {
+    if (!enabled || sound.current) return
+    const gesture = (event: Event) => {
+      if (event.target instanceof Element && event.target.closest('.sound-toggle')) return
+      remove()
+      void startSound()
+    }
+    const remove = () => {
+      window.removeEventListener('pointerdown', gesture)
+      window.removeEventListener('keydown', gesture)
+    }
+    window.addEventListener('pointerdown', gesture, { passive: true })
+    window.addEventListener('keydown', gesture)
+    return remove
+  }, [enabled, startSound])
+
   const toggle = async () => {
     setError(false)
     if (enabled) {
       const current = sound.current
       sound.current = null
       setEnabled(false)
+      try { localStorage.setItem('ore-sound', 'off') } catch { /* preference is optional */ }
       if (current) await current.close()
       return
     }
-    setStarting(true)
-    let current: Soundscape | null = null
-    try {
-      current = new Soundscape()
-      await current.start()
-      sound.current = current
-      setEnabled(true)
-    } catch {
-      if (current) void current.close()
-      setError(true)
-    } finally {
-      setStarting(false)
-    }
+    try { localStorage.removeItem('ore-sound') } catch { /* preference is optional */ }
+    await startSound()
   }
 
   return <div className="sound-control">

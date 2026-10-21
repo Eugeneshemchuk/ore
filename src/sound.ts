@@ -1,5 +1,5 @@
 /// <reference types="vite/client" />
-// Sound is opt-in; the supplied Matrix sample is loaded only after activation.
+// Sound starts on the first gesture; the supplied Matrix sample is loaded only after activation.
 export class Soundscape {
   private readonly context = new AudioContext()
   private readonly master = this.context.createGain()
