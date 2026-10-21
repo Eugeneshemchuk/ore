@@ -1462,7 +1462,9 @@ function CrystalParticleAura({ reducedMotion }: { reducedMotion: boolean }) {
     material.current.uniforms.uDpr.value = gl.getPixelRatio()
     material.current.uniforms.uOpacity.value = entering * leaving * (mobile ? 0.58 : 0.76)
   })
-  return <points geometry={geometry} frustumCulled={false} renderOrder={3}>
+  // The aura sits inside the ore's raycast group; without this, the default
+  // 1-unit Points threshold wins every hover and the scan misses the rock.
+  return <points geometry={geometry} frustumCulled={false} renderOrder={3} raycast={() => null}>
     <shaderMaterial ref={material} transparent depthWrite={false} blending={THREE.AdditiveBlending} uniforms={uniforms} toneMapped={false} vertexShader={/* glsl */ `
       attribute float aSeed;
       attribute float aTone;
@@ -2097,7 +2099,7 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
           </sprite>
         </object3D>}
       </mesh>)}
-      {scene.rubble.map((r, index) => <mesh key={index} position={r.position} scale={r.scale} rotation={[index, index * 2, 0]}>
+      {scene.rubble.map((r, index) => <mesh key={index} position={r.position} scale={r.scale} rotation={[index, index * 2, 0]} raycast={() => null}>
         <dodecahedronGeometry args={[1, 0]} />
         <meshStandardMaterial ref={(material) => { keep(material); if (material) rubbleMaterials.current[index] = material }} color="#4a4f52" roughness={0.9} metalness={0.3} flatShading transparent opacity={0} fog={false} />
       </mesh>)}
