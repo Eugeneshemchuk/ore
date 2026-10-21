@@ -60,8 +60,8 @@ h1 em { color: #f06e4e; font-style: normal; }
 @keyframes headline-letter { 0%, 100% { opacity: .65; color: #ff9a49; } 8%, 12% { opacity: 1; color: #ffcf9e; text-shadow: 0 0 15px #ff681c, 0 0 32px rgba(255, 93, 19, .5); } 22%, 80% { opacity: .72; color: #ff9a49; } }
 /* Titles float in the scene as fixed 3D panels driven by the chapter phase:
    a translucent sibling of the CTA, cut on the opposite diagonal. */
-.title-stage { position: fixed; inset: 0; z-index: 2; display: flex; align-items: center; padding: 0 8vw; perspective: 1100px; perspective-origin: 25% 50%; pointer-events: none; filter: drop-shadow(0 18px 24px rgba(0, 0, 0, .45)) drop-shadow(0 0 18px rgba(255, 106, 34, .1)); }
-.title-panel { position: relative; max-width: min(900px, 100%); padding: 26px 54px 34px 34px; visibility: hidden; opacity: 0; will-change: transform, opacity; background: linear-gradient(125deg, rgba(42, 20, 10, .46), rgba(10, 10, 11, .12) 64%); border: 1px solid rgba(214, 96, 42, .4); clip-path: polygon(0 0, calc(100% - 18px) 0, 100% 18px, 100% 100%, 18px 100%, 0 calc(100% - 18px)); backdrop-filter: blur(2px); }
+.title-stage { position: fixed; inset: 0; z-index: 2; display: flex; align-items: flex-end; padding: 0 4vw 19svh; perspective: 1100px; perspective-origin: 15% 75%; pointer-events: none; filter: drop-shadow(0 18px 24px rgba(0, 0, 0, .45)) drop-shadow(0 0 18px rgba(255, 106, 34, .1)); }
+.title-panel { position: relative; max-width: min(900px, 100%); padding: 26px 54px 34px 34px; visibility: hidden; opacity: 0; transform-origin: 0 100%; will-change: transform, opacity; background: linear-gradient(125deg, rgba(42, 20, 10, .46), rgba(10, 10, 11, .12) 64%); border: 1px solid rgba(214, 96, 42, .4); clip-path: polygon(0 0, calc(100% - 18px) 0, 100% 18px, 100% 100%, 18px 100%, 0 calc(100% - 18px)); backdrop-filter: blur(2px); }
 .title-panel::before { content: ''; position: absolute; inset: 5px; border: 1px solid rgba(255, 140, 70, .1); clip-path: polygon(0 0, calc(100% - 15px) 0, 100% 15px, 100% 100%, 15px 100%, 0 calc(100% - 15px)); pointer-events: none; }
 .title-index { display: block; margin-bottom: 20px; color: #c47a4a; font: 500 10px/1 ui-monospace, 'SFMono-Regular', Consolas, monospace; letter-spacing: .32em; text-transform: uppercase; }
 .title-scan { position: absolute; left: 0; right: 0; top: 0; height: 1px; background: linear-gradient(90deg, transparent, #ffc28a 30%, #ff6a22 70%, transparent); box-shadow: 0 0 10px #ff6a22; opacity: 0; pointer-events: none; }
@@ -99,7 +99,7 @@ h1 em { color: #f06e4e; font-style: normal; }
 @keyframes cta-idle-sweep { 0%, 4% { left: -45%; opacity: 0; } 7% { opacity: .8; } 16% { left: 125%; opacity: 0; } 100% { left: 125%; opacity: 0; } }
 @keyframes cta-edge { 0% { transform: translateX(-120%); opacity: 0; } 18% { opacity: 1; } 85% { opacity: .8; } 100% { transform: translateX(300%); opacity: 0; } }
 @keyframes cta-decode { 0%, 24%, 42% { opacity: 0; } 12%, 32%, 58% { opacity: .85; text-shadow: 0 0 8px #ff6b28; } 100% { opacity: .5; } }
-.mind .rain-headline, .potential .rain-headline { font-size: clamp(15px, 3.35vw, 50px); }
+.void .rain-headline, .mind .rain-headline, .potential .rain-headline { font-size: clamp(15px, 3.35vw, 50px); }
 @media (max-width: 720px) {
   .chrome { padding: max(12px, env(safe-area-inset-top)) max(20px, env(safe-area-inset-right)) 12px max(20px, env(safe-area-inset-left)); }
   .chrome nav { position: fixed; left: 0; right: 0; bottom: 0; justify-content: center; gap: clamp(14px, 5vw, 30px); padding: 0 16px env(safe-area-inset-bottom); background: rgba(7, 8, 9, .88); }
@@ -111,7 +111,8 @@ h1 em { color: #f06e4e; font-style: normal; }
   .mind { min-height: 775svh; }
   .potential { min-height: 250svh; }
   .hero-copy, .potential-copy { width: 100%; text-align: center; }
-  .title-stage { justify-content: center; padding: 0 16px; perspective-origin: 50% 50%; }
+  .title-stage { justify-content: center; align-items: center; padding: 0 16px; perspective-origin: 50% 50%; }
+  .title-panel { transform-origin: 50% 50%; }
   .title-panel { padding: 18px 20px 24px; }
   .title-index { text-align: center; margin-bottom: 14px; }
   .title-signal { padding-bottom: 16svh; }

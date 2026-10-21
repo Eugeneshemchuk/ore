@@ -2477,6 +2477,7 @@ export function Experience() {
       <SignalChapter id="signal" />
 
       <section id="void" className="chapter void" aria-label="Chapter two: Void">
+        <FloatingTitle className="title-void" index="02 · Void" enter={[1.62, 1.76]} exit={[1.98, 2.12]}>{(present) => <RainHeadline lines={['The architect behind this.', 'Claude Opus 5.5']} active={present} />}</FloatingTitle>
       </section>
 
       <section id="mind" className="chapter mind" aria-label="Chapter three: Mind">
@@ -2569,7 +2570,9 @@ function FloatingTitle({ enter, exit, index, className, children }: { enter: [nu
       const depth = -900 * (1 - arrive) ** 2 + 560 * leave ** 1.6
       const turnY = -16 * (1 - arrive) + 12 * leave + tilt.x * 8
       const turnX = 6 * (1 - arrive) - 4 * leave - tilt.y * 5
-      element.style.transform = `translate3d(${(1 - arrive) * -40}px, ${Math.sin(t * 0.6 + seed) * 7}px, ${depth.toFixed(1)}px) rotateY(${turnY.toFixed(2)}deg) rotateX(${turnX.toFixed(2)}deg) rotateZ(${(Math.sin(t * 0.4 + seed) * 0.6).toFixed(2)}deg)`
+      // Cards sit slightly reduced, shrinking toward their lower-left corner.
+      const scale = window.innerWidth < 720 ? 0.92 : 0.82
+      element.style.transform = `scale(${scale}) translate3d(${(1 - arrive) * -40}px, ${Math.sin(t * 0.6 + seed) * 7}px, ${depth.toFixed(1)}px) rotateY(${turnY.toFixed(2)}deg) rotateX(${turnX.toFixed(2)}deg) rotateZ(${(Math.sin(t * 0.4 + seed) * 0.6).toFixed(2)}deg)`
     }
     window.addEventListener('pointermove', move, { passive: true })
     frame = requestAnimationFrame(tick)
