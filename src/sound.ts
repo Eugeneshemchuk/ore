@@ -103,8 +103,11 @@ export class Soundscape {
     }
   }
 
-  asteroidHover(active: boolean) {
-    this.asteroidHumGain.gain.setTargetAtTime(active ? 0.12 : 0, this.context.currentTime, active ? 0.2 : 0.35)
+  // The electrical hum belongs to the neural network: it swells while the
+  // network is on screen and stays well under the other layers.
+  networkHum(level: number) {
+    const presence = Math.max(0, Math.min(1, level))
+    this.asteroidHumGain.gain.setTargetAtTime(presence * 0.045, this.context.currentTime, 0.4)
   }
 
   private async loadCrystalZoomSample() {

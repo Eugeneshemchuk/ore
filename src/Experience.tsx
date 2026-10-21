@@ -455,10 +455,13 @@ function DigitalRain({ reducedMotion }: { reducedMotion: boolean }) {
 
 const NEURON_ANCHOR = new THREE.Vector3(0, 0, 0.9)
 // Radius of each iris disc in the mask's eye sockets.
-// Fixed quarter turn on every axis, baked into the seed so clicks and drag
-// rotation keep working in the network's local space.
-const NETWORK_TURN = new THREE.Euler(Math.PI / 2, Math.PI / 2, Math.PI / 2)
 const IRIS_RADIUS = 0.14
+// The mask's live pose (x pitch, y the shader's yaw), written by VoidField
+// each frame. The network reads it so the face and brain turn as one object.
+const maskPose = new THREE.Vector2()
+// The mask turns about this point; the brain sits behind its forehead.
+const MASK_PIVOT = new THREE.Vector3(0, 0, -4.24)
+const BRAIN_OFFSET = new THREE.Vector3(0, 1.7, -1.22)
 
 type RepulsionUniforms = {
   uRepelPointer: { value: THREE.Vector2 }
@@ -545,6 +548,8 @@ function NeuralNetwork({ group, repulsion, reducedMotion }: { group: RefObject<T
   const drag = useRef({ active: false, x: 0, y: 0, moved: false })
   const userRotation = useRef(new THREE.Vector2())
   const rotationVelocity = useRef(new THREE.Vector2())
+  const poseEuler = useMemo(() => new THREE.Euler(), [])
+  const maskQuaternion = useMemo(() => new THREE.Quaternion(), [])
   const networkEmber = useMemo(() => new THREE.Color('#67d7ff'), [])
   const networkLine = useMemo(() => new THREE.Color('#4ea9ff'), [])
   const mineralLight = useMemo(() => new THREE.Color('#c8e4ed'), [])
@@ -566,22 +571,28 @@ function NeuralNetwork({ group, repulsion, reducedMotion }: { group: RefObject<T
   const { nodes, links, original, folded, edges } = useMemo(() => {
     const positions: THREE.Vector3[] = [NEURON_ANCHOR.clone()]
     const seed = (index: number) => {
-      // A broad cerebral silhouette: two asymmetric hemispheres, a clear
-      // central fissure and a shallow, living depth. It borrows the reference
-      // image's branching brain mass rather than reading as a round graph.
-      // The hemispheres lie horizontally, one above the other, scaled so the
-      // whole mass keeps its footprint in the crown.
-      const lobeIndex = Math.floor(index / 2)
+      // A cerebrum behind the mask's forehead: two hemispheres side by side,
+      // split by a vertical fissure and long from front to back.
       const side = index % 2 === 0 ? -1 : 1
-      const angle = lobeIndex * 2.3999632297
-      const radius = Math.sqrt(lobeIndex / 180)
-      const crown = 0.82 + Math.sin(angle * 1.7) * 0.18
-      const lobeWidth = 0.24 + radius * (1.26 + Math.sin(lobeIndex * 2.7) * 0.13)
+      const k = Math.floor(index / 2)
+      const theta = k * 2.3999632297 + (side > 0 ? 1.1 : 0)
+      const y = 1 - 2 * (k + 0.5) / 210
+      const ring = Math.sqrt(1 - y * y)
+      const outward = Math.abs(Math.cos(theta)) * ring
+      const z = Math.sin(theta) * ring
+      const noise = Math.sin((index + 1) * 12.9898) * 43758.5453
+      const depth = noise - Math.floor(noise)
+      // About two thirds of the nodes form the cortex; the rest fill the
+      // interior evenly by volume so the brain never reads as hollow.
+      const shell = depth < 0.64 ? 0.78 + depth / 0.64 * 0.22 : 0.12 + Math.cbrt((depth - 0.64) / 0.36) * 0.66
+      // Shallow gyri ripple the cortex; the temporal lobe bulges low and forward.
+      const r = shell * (1 + Math.sin(theta * 5 + y * 9) * 0.05)
+      const temporal = Math.max(0, -y) * Math.max(0, z + 0.2) * 0.35
       return new THREE.Vector3(
-        (Math.sin(angle) * radius * 1.16 + (1 - radius) * 0.24) * 1.2,
-        side * lobeWidth * crown * 0.75,
-        Math.cos(angle * 1.43) * radius * 0.76 + Math.sin(lobeIndex * 17.1) * 0.12,
-      ).applyEuler(NETWORK_TURN)
+        side * (0.05 + (outward * 0.9 + temporal) * r),
+        y * r * (y > 0 ? 0.8 : 0.5),
+        z * r * 1.1,
+      )
     }
     // Keep both hemispheres so the field can sit in the mask's crown as a
     // recognisable neural brain, rather than reading as a graph beside it.
@@ -690,24 +701,19 @@ function NeuralNetwork({ group, repulsion, reducedMotion }: { group: RefObject<T
     const nodeVisibility = arrival * (1 - THREE.MathUtils.smoothstep(phase, 2.94, 3.16))
     const lineVisibility = arrival * (1 - THREE.MathUtils.smoothstep(phase, 2.86, 3.06))
     if (group.current) {
-      // Reset every Euler component before blending: the previous frame's
-      // slerp can otherwise leak its Z rotation back into the next frame.
-      const maskTurn = reducedMotion ? 0 : THREE.MathUtils.smoothstep(phase, 1.54, 2.28) * Math.PI
-      // Anchor the network inside the upper headpiece, behind the face's
-      // particle relief. It inherits the mask's turn, so the reveal reads as
-      // a mind contained by the mask instead of a second object beside it.
+      // The brain shares the mask's pose about the mask's pivot, so face and
+      // network turn as one object. Hand rotation spins the brain about its
+      // own centre once the face has dissolved. The shader's yaw is a
+      // negative Y rotation in three.js terms.
       if (!drag.current.active) {
         userRotation.current.add(rotationVelocity.current)
         rotationVelocity.current.multiplyScalar(Math.exp(-Math.min(delta, 0.1) * 4.8))
       }
       userRotation.current.x = THREE.MathUtils.clamp(userRotation.current.x, -0.62, 0.62)
-      group.current.rotation.set(
-        userRotation.current.x + Math.sin(clock.getElapsedTime() * 0.11) * 0.035,
-        maskTurn * 0.92 + userRotation.current.y + clock.getElapsedTime() * 0.014,
-        0,
-      )
+      maskQuaternion.setFromEuler(poseEuler.set(maskPose.x, -maskPose.y, 0))
+      group.current.quaternion.setFromEuler(poseEuler.set(userRotation.current.x, userRotation.current.y, 0)).premultiply(maskQuaternion)
+      group.current.position.copy(BRAIN_OFFSET).applyQuaternion(maskQuaternion).add(MASK_PIVOT)
       group.current.scale.setScalar(1.02 + arrival * 0.1)
-      group.current.position.set(0, 1.62, -4.68)
     }
     const nodePositions = nodes.getAttribute('position') as THREE.BufferAttribute
     const linkPositions = links.getAttribute('position') as THREE.BufferAttribute
@@ -732,7 +738,7 @@ function NeuralNetwork({ group, repulsion, reducedMotion }: { group: RefObject<T
     }
   })
 
-  return <group ref={group} position={[0, 1.62, -4.68]}>
+  return <group ref={group} position={[0, 1.7, -5.46]}>
     <lineSegments geometry={links} frustumCulled={false}>
       <lineBasicMaterial ref={lineMaterial} color="#4ea9ff" transparent opacity={0} depthWrite={false} onBeforeCompile={repelShader} />
     </lineSegments>
@@ -1106,6 +1112,7 @@ function VoidField({ motion, reducedMotion }: { motion: RefObject<SwarmMotion>; 
       reducedMotion ? 0 : faceRotation.current.x + Math.sin(clock.getElapsedTime() * 0.27) * 0.026,
       reducedMotion ? 0 : faceRotation.current.y + presentationTurn + Math.sin(clock.getElapsedTime() * 0.19) * 0.05,
     )
+    maskPose.copy(live.uFaceRotation.value)
     const faceActive = phase > 1.12 && phase < 2.14 && motion.current.active && !reducedMotion
     live.uFaceDisturb.value = THREE.MathUtils.lerp(live.uFaceDisturb.value, faceActive ? 1 : 0, 1 - Math.exp(-dt * 20))
     const echo = neuralEcho.current
@@ -1508,7 +1515,7 @@ function CameraDirector({ reducedMotion, oreGroup, motion }: { reducedMotion: bo
   const signalLook = useMemo(() => new THREE.Vector3(0, 0, 0), [])
   const voidLook = useMemo(() => new THREE.Vector3(0, 0, -5.8), [])
   const faceLook = useMemo(() => new THREE.Vector3(0, 0.24, -4.25), [])
-  const mindLook = useMemo(() => new THREE.Vector3(0, 1.62, -4.68), [])
+  const mindLook = useMemo(() => new THREE.Vector3(0, 1.7, -3.6), [])
   const mindApproachLook = useMemo(() => new THREE.Vector3(0.02, 1.6, -4.72), [])
   const mindInnerLook = useMemo(() => new THREE.Vector3(-0.08, 1.58, -5.0), [])
   const mindCrossLook = useMemo(() => new THREE.Vector3(0.12, 1.48, -5.7), [])
@@ -2281,23 +2288,25 @@ function SoundToggle() {
     const update = () => {
       const phase = chapterPhase()
       sound.current?.update(phase)
-      const closeUpReached = (lastAudioPhase < 2.75 && phase >= 2.75 && phase < 3)
-        || (lastAudioPhase > 2.82 && phase <= 2.82 && phase > 2)
-      if (closeUpReached && !motionPreference.matches && !document.hidden && performance.now() - lastCrystalZoom > 2000) {
+      // The glass crackle marks the moment the camera draws level with the
+      // asteroid and passes it, in either scroll direction.
+      const asteroidPassed = (lastAudioPhase < 3.68 && phase >= 3.68 && phase < 3.82)
+        || (lastAudioPhase > 3.74 && phase <= 3.74 && phase > 3.5)
+      if (asteroidPassed && !motionPreference.matches && !document.hidden && performance.now() - lastCrystalZoom > 2000) {
         sound.current?.crystalZoom()
         lastCrystalZoom = performance.now()
       }
       const difference = Math.abs(((phase - lastAudioPhase + 6) % 4) - 2)
       const departure = signalDeparture(phase)
       const presence = THREE.MathUtils.smoothstep(departure, 0.12, 0.42) * (1 - THREE.MathUtils.smoothstep(departure, 0.8, 0.98))
+      const networkPresence = THREE.MathUtils.smoothstep(phase, 1.7, 1.95) * (1 - THREE.MathUtils.smoothstep(phase, 2.86, 3.06))
+      sound.current?.networkHum(motionPreference.matches || document.hidden ? 0 : networkPresence)
       sound.current?.glyphZoom(motionPreference.matches || document.hidden ? 0 : presence * Math.min(1, difference * 90))
       lastAudioPhase = phase
     }
     const music = window.setInterval(() => sound.current?.note(chapterPhase()), 1700)
     const ambience = window.setInterval(update, 250)
     const crystal = () => sound.current?.cue('crystal')
-    const asteroidEnter = () => sound.current?.asteroidHover(true)
-    const asteroidLeave = () => sound.current?.asteroidHover(false)
     let lastPointer: { x: number; y: number; time: number } | null = null
     let lastNetworkMotion = 0
     const networkMove = (event: PointerEvent) => {
@@ -2356,7 +2365,7 @@ function SoundToggle() {
     const visibility = () => {
       const current = sound.current
       if (!current) return
-      if (document.hidden) { stopNetwork(); asteroidLeave(); void current.suspend() }
+      if (document.hidden) { stopNetwork(); current.networkHum(0); void current.suspend() }
       else void current.resume().catch(() => setError(true))
     }
     // iOS can interrupt audio independently of page visibility. Retry only on
@@ -2368,12 +2377,9 @@ function SoundToggle() {
     update()
     window.addEventListener('ore-ripple', crystal)
     window.addEventListener('ore-crystal-hover', crystal)
-    window.addEventListener('ore-crystal-hover', asteroidEnter)
-    window.addEventListener('ore-crystal-leave', asteroidLeave)
     window.addEventListener('pointermove', networkMove, { passive: true })
     window.addEventListener('pointerout', pointerLeave)
     window.addEventListener('blur', stopNetwork)
-    window.addEventListener('blur', asteroidLeave)
     window.addEventListener('scroll', transition, { passive: true })
     window.addEventListener('pointerdown', recoverAudio, { passive: true })
     document.addEventListener('click', click)
@@ -2384,12 +2390,9 @@ function SoundToggle() {
       window.clearInterval(networkIdle)
       window.removeEventListener('ore-ripple', crystal)
       window.removeEventListener('ore-crystal-hover', crystal)
-      window.removeEventListener('ore-crystal-hover', asteroidEnter)
-      window.removeEventListener('ore-crystal-leave', asteroidLeave)
       window.removeEventListener('pointermove', networkMove)
       window.removeEventListener('pointerout', pointerLeave)
       window.removeEventListener('blur', stopNetwork)
-      window.removeEventListener('blur', asteroidLeave)
       window.removeEventListener('scroll', transition)
       window.removeEventListener('pointerdown', recoverAudio)
       document.removeEventListener('click', click)
