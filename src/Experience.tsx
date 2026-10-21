@@ -10,17 +10,19 @@ const KATAKANA = [...'ﾊﾐﾋｰｳｼﾅﾓﾆｻﾜﾂｵﾘｱﾎﾃﾏｹ�
 const ATLAS_COLUMNS = 8
 const RAIN_CELL_PX = window.innerWidth < 720 ? 15 : 19
 
-// Scene progress 0..1 across the three chapters, rewinding to 0 while the looped copy of chapter one scrolls in.
-// The page repeats every loop period, so positions in the lead-in copy of chapter three map onto the real one.
+// Scene progress across the four chapters, rewinding to 0 while the looped
+// copy of Signal scrolls in. The page repeats every loop period.
 function rawChapterPhase() {
   const start = document.getElementById('signal')?.offsetTop ?? 0
+  const voidScene = (document.getElementById('void')?.offsetTop ?? 0) - start
   const mind = (document.getElementById('mind')?.offsetTop ?? 0) - start
   const potential = (document.getElementById('potential')?.offsetTop ?? 0) - start
   const period = Math.max(1, (document.getElementById('loop')?.offsetTop ?? 0) - start)
   const y = (((window.scrollY - start) % period) + period) % period
-  if (y < mind) return y / Math.max(1, mind)
-  if (y < potential) return 1 + (y - mind) / Math.max(1, potential - mind)
-  return 2 + (y - potential) / Math.max(1, period - potential)
+  if (y < voidScene) return y / Math.max(1, voidScene)
+  if (y < mind) return 1 + (y - voidScene) / Math.max(1, mind - voidScene)
+  if (y < potential) return 2 + (y - mind) / Math.max(1, potential - mind)
+  return 3 + (y - potential) / Math.max(1, period - potential)
 }
 
 // A single eased timeline keeps all WebGL layers in step, including at the loop seam.
@@ -47,10 +49,10 @@ function ScrollMotion({ reducedMotion }: { reducedMotion: boolean }) {
     const target = rawChapterPhase()
     const dt = Math.min(delta, 0.1)
     const current = visualPhase ?? target
-    // Choose the shortest path across the 0/3 boundary instead of rotating through all chapters.
-    const difference = ((target - current + 4.5) % 3) - 1.5
+    // Choose the shortest path across the 0/4 boundary instead of rotating through all chapters.
+    const difference = ((target - current + 6) % 4) - 2
     const next = reducedMotion ? target : current + difference * (1 - Math.exp(-dt * (mobile.matches ? 7 : 12)))
-    visualPhase = (next + 3) % 3
+    visualPhase = (next + 4) % 4
 
     // A small velocity-driven softening suggests motion without blurring text or burdening mobile GPUs.
     if (!shell.current) return
@@ -66,14 +68,152 @@ function ScrollMotion({ reducedMotion }: { reducedMotion: boolean }) {
   return null
 }
 
+// A tiny ping-pong post pass keeps only the cursor's local render history.
+// It gives a moving particle field a soft afterimage without blurring type,
+// the static scene, or the glyph-rain opening.
+function MaskedInteractionTrails({ motion, reducedMotion }: { motion: RefObject<SwarmMotion>; reducedMotion: boolean }) {
+  const { gl, scene, camera, size } = useThree()
+  const targets = useRef<{ read: THREE.WebGLRenderTarget; write: THREE.WebGLRenderTarget; current: THREE.WebGLRenderTarget } | null>(null)
+  const trailStrength = useRef(0)
+  const screenScene = useMemo(() => new THREE.Scene(), [])
+  const screenCamera = useMemo(() => new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1), [])
+  const geometry = useMemo(() => new THREE.PlaneGeometry(2, 2), [])
+  const composite = useMemo(() => new THREE.ShaderMaterial({
+    uniforms: {
+      tCurrent: { value: null }, tHistory: { value: null },
+      uPointer: { value: new THREE.Vector2(9, 9) }, uAspect: { value: 1 }, uMask: { value: 0 }, uPotential: { value: 0 },
+    },
+    vertexShader: /* glsl */ `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+    fragmentShader: /* glsl */ `
+      uniform sampler2D tCurrent, tHistory;
+      uniform vec2 uPointer;
+      uniform float uAspect, uMask, uPotential;
+      varying vec2 vUv;
+      void main() {
+        vec4 current = texture2D(tCurrent, vUv);
+        vec4 history = texture2D(tHistory, vUv);
+        vec2 pointerUv = uPointer * 0.5 + 0.5;
+        vec2 cursorOffset = vUv - pointerUv;
+        float distanceToPointer = length(cursorOffset * vec2(uAspect, 1.0));
+        // Potential gets a compact, portrait-shaped cursor window: narrower
+        // across than it is tall, instead of the earlier circular bloom.
+        float potentialDistance = length(cursorOffset * vec2(uAspect / 0.58, 1.0 / 1.32));
+        float roundMask = 1.0 - smoothstep(0.055, 0.31, distanceToPointer);
+        float potentialMask = 1.0 - smoothstep(0.034, 0.17, potentialDistance);
+        float mask = mix(roundMask, potentialMask, uPotential) * uMask;
+        // The alpha channel stores the decaying interaction mask. It allows
+        // earlier cursor positions to leave a short trail, not a full frame blur.
+        float historyMask = history.a * 0.84;
+        // Store only the masked interaction contribution. The unmodified
+        // scene renders straight to screen, preserving its normal color path.
+        vec3 color = current.rgb * mask + history.rgb * historyMask * 0.64;
+        gl_FragColor = vec4(color, max(mask, historyMask));
+      }`,
+    depthTest: false,
+    depthWrite: false,
+  }), [])
+  const overlay = useMemo(() => new THREE.ShaderMaterial({
+    uniforms: { tTrail: { value: null } },
+    vertexShader: /* glsl */ `varying vec2 vUv; void main() { vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+    fragmentShader: /* glsl */ `
+      uniform sampler2D tTrail;
+      varying vec2 vUv;
+      void main() {
+        vec4 trail = texture2D(tTrail, vUv);
+        gl_FragColor = vec4(trail.rgb * 0.46, trail.a * 0.56);
+      }`,
+    transparent: true,
+    blending: THREE.AdditiveBlending,
+    depthTest: false,
+    depthWrite: false,
+  }), [])
+  const quad = useMemo(() => new THREE.Mesh<THREE.PlaneGeometry, THREE.Material>(geometry, composite), [composite, geometry])
+
+  useEffect(() => {
+    screenScene.add(quad)
+    return () => { screenScene.remove(quad) }
+  }, [quad, screenScene])
+  useEffect(() => () => {
+    targets.current?.read.dispose()
+    targets.current?.write.dispose()
+    targets.current?.current.dispose()
+    geometry.dispose()
+    composite.dispose()
+    overlay.dispose()
+  }, [composite, geometry, overlay])
+  useEffect(() => {
+    const width = Math.max(1, Math.floor(size.width * gl.getPixelRatio()))
+    const height = Math.max(1, Math.floor(size.height * gl.getPixelRatio()))
+    targets.current?.read.dispose()
+    targets.current?.write.dispose()
+    targets.current?.current.dispose()
+    targets.current = {
+      read: new THREE.WebGLRenderTarget(width, height, { depthBuffer: false }),
+      write: new THREE.WebGLRenderTarget(width, height, { depthBuffer: false }),
+      current: new THREE.WebGLRenderTarget(width, height, { depthBuffer: false }),
+    }
+    return () => {
+      targets.current?.read.dispose()
+      targets.current?.write.dispose()
+      targets.current?.current.dispose()
+      targets.current = null
+    }
+  }, [gl, size.height, size.width])
+
+  useFrame((_, delta) => {
+    const currentTargets = targets.current
+    const phase = chapterPhase()
+    const supported = !reducedMotion && size.width >= 721 && currentTargets
+    if (!supported) {
+      gl.setRenderTarget(null)
+      gl.render(scene, camera)
+      return
+    }
+    const dt = Math.min(delta, 0.1)
+    const active = motion.current.active && phase > 0.96 && phase < 3.9
+    const desired = active ? 0.6 + motion.current.energy * 0.4 : 0
+    trailStrength.current = THREE.MathUtils.lerp(trailStrength.current, desired, 1 - Math.exp(-dt * 7))
+
+    // The direct render retains exactly the same ACES/tone-mapping and
+    // color-space route as the unprocessed canvas.
+    gl.setRenderTarget(null)
+    gl.render(scene, camera)
+
+    gl.setRenderTarget(currentTargets.current)
+    gl.clear()
+    gl.render(scene, camera)
+
+    composite.uniforms.tCurrent.value = currentTargets.current.texture
+    composite.uniforms.tHistory.value = currentTargets.read.texture
+    composite.uniforms.uPointer.value.copy(motion.current.pointer)
+    composite.uniforms.uAspect.value = size.width / Math.max(size.height, 1)
+    composite.uniforms.uMask.value = trailStrength.current
+    composite.uniforms.uPotential.value = phase > 2.72 && phase < 3.56 ? 1 : 0
+    gl.setRenderTarget(currentTargets.write)
+    gl.clear()
+    gl.render(screenScene, screenCamera)
+
+    overlay.uniforms.tTrail.value = currentTargets.write.texture
+    quad.material = overlay
+    gl.setRenderTarget(null)
+    gl.render(screenScene, screenCamera)
+    quad.material = composite
+
+    const swap = currentTargets.read
+    currentTargets.read = currentTargets.write
+    currentTargets.write = swap
+  }, 1)
+  return null
+}
+
 function loopProgress() {
   const phase = chapterPhase()
-  return phase <= 2 ? phase / 2 : 3 - phase
+  return phase <= 3 ? phase / 3 : 4 - phase
 }
 
 // The same bridge runs backwards at the loop seam, connecting signal directly to crystal.
 function signalDeparture(phase: number) {
-  return phase < 1 ? phase : phase > 2 ? 3 - phase : 1
+  return phase < 1 ? phase : phase > 3 ? 4 - phase : 1
 }
 
 const rainVertexShader = /* glsl */ `
@@ -307,6 +447,7 @@ type RepulsionUniforms = {
   uRepelPointer: { value: THREE.Vector2 }
   uRepelAspect: { value: number }
   uRepelStrength: { value: number }
+  uMindGlow: { value: number }
 }
 
 // Work in screen space so particles at different depths all respond around the
@@ -317,17 +458,25 @@ function configureRepulsion(shader: THREE.WebGLProgramParametersWithUniforms, un
     .replace('#include <common>', `#include <common>
       uniform vec2 uRepelPointer;
       uniform float uRepelAspect;
-      uniform float uRepelStrength;`)
+      uniform float uRepelStrength;
+      uniform float uMindGlow;
+      varying float vMindGlow;`)
     .replace('#include <project_vertex>', `#include <project_vertex>
       if (gl_Position.w > 0.0) {
         vec2 screen = gl_Position.xy / gl_Position.w;
         vec2 delta = (screen - uRepelPointer) * vec2(uRepelAspect, 1.0);
         float distanceToPointer = length(delta);
         float influence = 1.0 - smoothstep(0.0, 0.28, distanceToPointer);
+        vMindGlow = influence * uMindGlow;
         vec2 direction = delta / max(distanceToPointer, 0.001);
         gl_Position.xy += direction / vec2(uRepelAspect, 1.0)
           * influence * 0.16 * uRepelStrength * gl_Position.w;
       }`)
+  shader.fragmentShader = shader.fragmentShader
+    .replace('#include <common>', `#include <common>
+      varying float vMindGlow;`)
+    .replace('#include <output_fragment>', `#include <output_fragment>
+      gl_FragColor.rgb *= 1.0 + vMindGlow * 0.05;`)
 }
 
 function RepulsionController({ uniforms, reducedMotion }: { uniforms: RepulsionUniforms; reducedMotion: boolean }) {
@@ -355,14 +504,19 @@ function RepulsionController({ uniforms, reducedMotion }: { uniforms: RepulsionU
     const damping = 1 - Math.exp(-Math.min(delta, 0.1) * 9)
     uniforms.uRepelPointer.value.lerp(target.current, damping)
     uniforms.uRepelAspect.value = size.width / Math.max(1, size.height)
-    const sceneStrength = THREE.MathUtils.smoothstep(signalDeparture(chapterPhase()), 0.65, 0.95)
-    const desired = active.current && !reducedMotion ? sceneStrength : 0
+    const phase = chapterPhase()
+    const mindChapter = phase > 1.98 && phase < 2.96
+    const sceneStrength = THREE.MathUtils.smoothstep(signalDeparture(phase), 0.65, 0.95)
+    // Mind responds as a soft local illumination, not a force that creates a
+    // black-hole-like gap in the neural field.
+    const desired = active.current && !reducedMotion && !mindChapter ? sceneStrength : 0
     uniforms.uRepelStrength.value = THREE.MathUtils.lerp(uniforms.uRepelStrength.value, desired, damping)
+    uniforms.uMindGlow.value = THREE.MathUtils.lerp(uniforms.uMindGlow.value, active.current && !reducedMotion && mindChapter ? 1 : 0, damping)
   })
   return null
 }
 
-function NeuralNetwork({ group, oreGroup, repulsion, reducedMotion }: { group: RefObject<THREE.Group | null>; oreGroup: RefObject<THREE.Group | null>; repulsion: RepulsionUniforms; reducedMotion: boolean }) {
+function NeuralNetwork({ group, repulsion, reducedMotion }: { group: RefObject<THREE.Group | null>; repulsion: RepulsionUniforms; reducedMotion: boolean }) {
   const nodeMaterial = useRef<THREE.PointsMaterial>(null)
   const lineMaterial = useRef<THREE.LineBasicMaterial>(null)
   const [addedNodes, setAddedNodes] = useState<THREE.Vector3[]>([])
@@ -370,11 +524,13 @@ function NeuralNetwork({ group, oreGroup, repulsion, reducedMotion }: { group: R
   const raycaster = useMemo(() => new THREE.Raycaster(), [])
   const clickPlane = useMemo(() => new THREE.Plane(), [])
   const clickPoint = useMemo(() => new THREE.Vector3(), [])
-  const orePosition = useMemo(() => new THREE.Vector3(), [])
-  const oreScale = useMemo(() => new THREE.Vector3(), [])
-  const oreRotation = useMemo(() => new THREE.Quaternion(), [])
-  const initialRotation = useMemo(() => new THREE.Quaternion(), [])
   const previousFold = useRef<number | null>(null)
+  const drag = useRef({ active: false, x: 0, y: 0, moved: false })
+  const userRotation = useRef(new THREE.Vector2())
+  const rotationVelocity = useRef(new THREE.Vector2())
+  const networkEmber = useMemo(() => new THREE.Color('#67d7ff'), [])
+  const networkLine = useMemo(() => new THREE.Color('#4ea9ff'), [])
+  const mineralLight = useMemo(() => new THREE.Color('#c8e4ed'), [])
   const repelShader = useMemo(() => (shader: THREE.WebGLProgramParametersWithUniforms) => configureRepulsion(shader, repulsion), [repulsion])
   const nodeTexture = useMemo(() => {
     const canvas = document.createElement('canvas')
@@ -393,15 +549,25 @@ function NeuralNetwork({ group, oreGroup, repulsion, reducedMotion }: { group: R
   const { nodes, links, original, folded, edges } = useMemo(() => {
     const positions: THREE.Vector3[] = [NEURON_ANCHOR.clone()]
     const seed = (index: number) => {
-      const angle = index * 2.3999632297
-      const radius = Math.sqrt(index / 146) * 2.8
+      // A broad cerebral silhouette: two asymmetric hemispheres, a clear
+      // central fissure and a shallow, living depth. It borrows the reference
+      // image's branching brain mass rather than reading as a round graph.
+      const lobeIndex = Math.floor(index / 2)
+      const side = index % 2 === 0 ? -1 : 1
+      const angle = lobeIndex * 2.3999632297
+      const radius = Math.sqrt(lobeIndex / 180)
+      const crown = 0.82 + Math.sin(angle * 1.7) * 0.18
+      const lobeWidth = 0.24 + radius * (1.26 + Math.sin(lobeIndex * 2.7) * 0.13)
       return new THREE.Vector3(
-        Math.cos(angle) * radius + (Math.sin(index * 91.7) * 0.5) * 0.35,
-        Math.sin(angle * 1.63) * radius * 0.58,
-        Math.sin(index * 43.31) * 1.25,
+        side * lobeWidth * crown,
+        Math.sin(angle) * radius * 1.16 + (1 - radius) * 0.24,
+        Math.cos(angle * 1.43) * radius * 0.76 + Math.sin(lobeIndex * 17.1) * 0.12,
       )
     }
-    for (let i = 0; i < 359; i += 1) positions.push(seed(i))
+    // Keep both hemispheres so the field can sit in the mask's crown as a
+    // recognisable neural brain, rather than reading as a graph beside it.
+    for (let i = 0; i < 420; i += 1) positions.push(seed(i))
+    const originalCount = positions.length
     positions.push(...addedNodes)
     const linkData: number[] = []
     const edgeData: number[] = []
@@ -413,8 +579,9 @@ function NeuralNetwork({ group, oreGroup, repulsion, reducedMotion }: { group: R
         .slice(0, 3)
       candidates.forEach(({ j }) => { edgeData.push(i, j); linkData.push(from.x, from.y, from.z, positions[j].x, positions[j].y, positions[j].z) })
     })
-    // New nodes always connect to their nearest existing neighbours, even when clicked outside the original field.
-    for (let i = 360; i < positions.length; i += 1) {
+    // Visitor-created nodes integrate into the existing graph rather than
+    // floating independently after a click.
+    for (let i = originalCount; i < positions.length; i += 1) {
       positions.slice(0, i).map((to, j) => ({ j, d: positions[i].distanceToSquared(to) }))
         .sort((a, b) => a.d - b.d).slice(0, 3).forEach(({ j }) => {
           edgeData.push(i, j)
@@ -435,45 +602,93 @@ function NeuralNetwork({ group, oreGroup, repulsion, reducedMotion }: { group: R
   }, [addedNodes])
 
   useEffect(() => {
-    const addNode = (event: PointerEvent) => {
+    const beginDrag = (event: PointerEvent) => {
       const phase = chapterPhase()
-      if (event.pointerType === 'touch' || event.button !== 0 || phase < 0.85 || phase > 1.3 || !group.current || (event.target instanceof Element && event.target.closest('a, button, input, select, textarea'))) return
-      raycaster.setFromCamera(new THREE.Vector2(event.clientX / window.innerWidth * 2 - 1, 1 - event.clientY / window.innerHeight * 2), camera)
-      group.current.getWorldPosition(clickPoint)
-      clickPlane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(new THREE.Vector3()), clickPoint)
-      const hit = raycaster.ray.intersectPlane(clickPlane, new THREE.Vector3())
-      if (!hit) return
-      group.current.worldToLocal(hit)
-      setAddedNodes(previous => [...previous.slice(-79), hit])
+      if (event.pointerType === 'touch' || event.button !== 0 || phase < 1.94 || phase > 2.78
+        || (event.target instanceof Element && event.target.closest('a, button, input, select, textarea'))) return
+      drag.current = { active: true, x: event.clientX, y: event.clientY, moved: false }
+      rotationVelocity.current.set(0, 0)
+      document.body.style.cursor = 'grabbing'
     }
-    window.addEventListener('pointerdown', addNode)
-    return () => window.removeEventListener('pointerdown', addNode)
+    const dragNetwork = (event: PointerEvent) => {
+      if (!drag.current.active) return
+      const dx = event.clientX - drag.current.x
+      const dy = event.clientY - drag.current.y
+      if (Math.hypot(dx, dy) > 3) drag.current.moved = true
+      drag.current.x = event.clientX
+      drag.current.y = event.clientY
+      userRotation.current.y += dx * 0.006
+      userRotation.current.x = THREE.MathUtils.clamp(userRotation.current.x + dy * 0.005, -0.62, 0.62)
+      rotationVelocity.current.set(dy * 0.005, dx * 0.006)
+    }
+    const endDrag = (event: PointerEvent) => {
+      if (!drag.current.active) return
+      const networkGroup = group.current
+      const shouldAddNode = !drag.current.moved && event.pointerType !== 'touch' && networkGroup
+      if (shouldAddNode && networkGroup) {
+        raycaster.setFromCamera(new THREE.Vector2(event.clientX / window.innerWidth * 2 - 1, 1 - event.clientY / window.innerHeight * 2), camera)
+        networkGroup.getWorldPosition(clickPoint)
+        clickPlane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(new THREE.Vector3()), clickPoint)
+        const hit = raycaster.ray.intersectPlane(clickPlane, new THREE.Vector3())
+        if (hit) {
+          networkGroup.worldToLocal(hit)
+          setAddedNodes(previous => [...previous.slice(-79), hit])
+        }
+      }
+      drag.current.active = false
+      document.body.style.cursor = ''
+    }
+    const cancelDrag = () => {
+      if (!drag.current.active) return
+      drag.current.active = false
+      document.body.style.cursor = ''
+    }
+    window.addEventListener('pointerdown', beginDrag)
+    window.addEventListener('pointermove', dragNetwork, { passive: true })
+    window.addEventListener('pointerup', endDrag)
+    window.addEventListener('pointercancel', endDrag)
+    window.addEventListener('blur', cancelDrag)
+    return () => {
+      window.removeEventListener('pointerdown', beginDrag)
+      window.removeEventListener('pointermove', dragNetwork)
+      window.removeEventListener('pointerup', endDrag)
+      window.removeEventListener('pointercancel', endDrag)
+      window.removeEventListener('blur', cancelDrag)
+      if (drag.current.active) document.body.style.cursor = ''
+    }
   }, [camera, clickPlane, clickPoint, group, raycaster])
   useEffect(() => {
     previousFold.current = null
     return () => { nodes.dispose(); links.dispose() }
   }, [nodes, links])
 
-  useFrame(({ clock }) => {
+  useFrame(({ clock }, delta) => {
     const phase = chapterPhase()
-    const fold = reducedMotion ? 0 : THREE.MathUtils.smoothstep(phase, 1.16, 1.62)
-    const arrival = THREE.MathUtils.smoothstep(phase, 0.36, 0.82)
-    const nodeVisibility = arrival * (1 - THREE.MathUtils.smoothstep(phase, 1.43, 1.86))
-    const lineVisibility = arrival * (1 - THREE.MathUtils.smoothstep(phase, 1.36, 1.78))
+    // The mind rises out of the crown before the camera enters it. It fades
+    // behind the viewer after the flythrough instead of folding into the ore.
+    const fold = 0
+    const arrival = THREE.MathUtils.smoothstep(phase, 1.46, 2.12)
+    const nodeVisibility = arrival * (1 - THREE.MathUtils.smoothstep(phase, 2.94, 3.16))
+    const lineVisibility = arrival * (1 - THREE.MathUtils.smoothstep(phase, 2.86, 3.06))
     if (group.current) {
       // Reset every Euler component before blending: the previous frame's
       // slerp can otherwise leak its Z rotation back into the next frame.
-      group.current.rotation.set(Math.sin(clock.getElapsedTime() * 0.11) * 0.12, clock.getElapsedTime() * 0.06, 0)
-      group.current.scale.setScalar(0.8 + arrival * 0.3)
-      group.current.position.set(1.55, -0.1, -0.55)
-      if (oreGroup.current && fold > 0) {
-        oreGroup.current.updateWorldMatrix(true, false)
-        oreGroup.current.matrixWorld.decompose(orePosition, oreRotation, oreScale)
-        initialRotation.copy(group.current.quaternion)
-        group.current.position.lerp(orePosition, fold)
-        group.current.quaternion.slerpQuaternions(initialRotation, oreRotation, fold)
-        group.current.scale.lerp(oreScale, fold)
+      const maskTurn = reducedMotion ? 0 : THREE.MathUtils.smoothstep(phase, 1.54, 2.28) * Math.PI
+      // Anchor the network inside the upper headpiece, behind the face's
+      // particle relief. It inherits the mask's turn, so the reveal reads as
+      // a mind contained by the mask instead of a second object beside it.
+      if (!drag.current.active) {
+        userRotation.current.add(rotationVelocity.current)
+        rotationVelocity.current.multiplyScalar(Math.exp(-Math.min(delta, 0.1) * 4.8))
       }
+      userRotation.current.x = THREE.MathUtils.clamp(userRotation.current.x, -0.62, 0.62)
+      group.current.rotation.set(
+        userRotation.current.x + Math.sin(clock.getElapsedTime() * 0.11) * 0.035,
+        maskTurn * 0.92 + userRotation.current.y + clock.getElapsedTime() * 0.014,
+        0,
+      )
+      group.current.scale.setScalar(1.02 + arrival * 0.1)
+      group.current.position.set(0, 1.62, -4.68)
     }
     const nodePositions = nodes.getAttribute('position') as THREE.BufferAttribute
     const linkPositions = links.getAttribute('position') as THREE.BufferAttribute
@@ -488,18 +703,22 @@ function NeuralNetwork({ group, oreGroup, repulsion, reducedMotion }: { group: R
       previousFold.current = fold
     }
     if (nodeMaterial.current) {
-      nodeMaterial.current.opacity = nodeVisibility
-      nodeMaterial.current.size = 0.065 + Math.sin(clock.getElapsedTime() * 2.1) * 0.01
+      nodeMaterial.current.opacity = nodeVisibility * 0.9
+      nodeMaterial.current.size = 0.055 + Math.sin(clock.getElapsedTime() * 2.1) * 0.007
+      nodeMaterial.current.color.lerpColors(networkEmber, mineralLight, THREE.MathUtils.smoothstep(fold, 0.18, 0.72))
     }
-    if (lineMaterial.current) lineMaterial.current.opacity = lineVisibility * 0.55
+    if (lineMaterial.current) {
+      lineMaterial.current.opacity = lineVisibility * 0.48
+      lineMaterial.current.color.lerpColors(networkLine, mineralLight, THREE.MathUtils.smoothstep(fold, 0.08, 0.54))
+    }
   })
 
-  return <group ref={group} position={[1.55, -0.1, -0.55]}>
+  return <group ref={group} position={[0, 1.62, -4.68]}>
     <lineSegments geometry={links} frustumCulled={false}>
-      <lineBasicMaterial ref={lineMaterial} color="#d9e3e5" transparent opacity={0} depthWrite={false} onBeforeCompile={repelShader} />
+      <lineBasicMaterial ref={lineMaterial} color="#4ea9ff" transparent opacity={0} depthWrite={false} onBeforeCompile={repelShader} />
     </lineSegments>
     <points geometry={nodes} frustumCulled={false}>
-      <pointsMaterial ref={nodeMaterial} map={nodeTexture} color="#f06e4e" transparent opacity={0} size={0.065} sizeAttenuation depthWrite={false} blending={THREE.AdditiveBlending} onBeforeCompile={repelShader} />
+      <pointsMaterial ref={nodeMaterial} map={nodeTexture} color="#67d7ff" transparent opacity={0} size={0.055} sizeAttenuation depthWrite={false} blending={THREE.AdditiveBlending} onBeforeCompile={repelShader} />
     </points>
   </group>
 }
@@ -545,9 +764,9 @@ function CosmicParticles({ repulsion }: { repulsion: RepulsionUniforms }) {
       if (mindField.current) mindField.current.rotation.copy(field.current.rotation)
     }
     const phase = chapterPhase()
-    const networkMask = 1 - THREE.MathUtils.smoothstep(phase, 0.55, 0.9) * (1 - THREE.MathUtils.smoothstep(phase, 1.35, 1.8))
+    const networkMask = 1 - THREE.MathUtils.smoothstep(phase, 1.55, 1.9) * (1 - THREE.MathUtils.smoothstep(phase, 2.9, 3.12))
     if (material.current) material.current.opacity = (0.14 + THREE.MathUtils.smoothstep(p, 0.52, 0.88) * 0.42) * networkMask
-    if (mindMaterial.current) mindMaterial.current.opacity = 0.42 * THREE.MathUtils.smoothstep(phase, 0.55, 0.9) * (1 - THREE.MathUtils.smoothstep(phase, 1.35, 1.8))
+    if (mindMaterial.current) mindMaterial.current.opacity = 0.42 * THREE.MathUtils.smoothstep(phase, 1.55, 1.9) * (1 - THREE.MathUtils.smoothstep(phase, 2.9, 3.12))
   })
   return <>
     <points ref={field} geometry={geometry}>
@@ -557,6 +776,440 @@ function CosmicParticles({ repulsion }: { repulsion: RepulsionUniforms }) {
       <pointsMaterial ref={mindMaterial} color="#d7e2e2" size={0.03} sizeAttenuation transparent opacity={0} depthWrite={false} onBeforeCompile={repelShader} />
     </points>
   </>
+}
+
+// The Void is a single reusable particle rig: first a deep mineral field, then
+// a directed swarm, and eventually the jade face. Density is tiered so the
+// desktop view can feel immense without making phones render desktop counts.
+function VoidField({ motion, reducedMotion }: { motion: RefObject<SwarmMotion>; reducedMotion: boolean }) {
+  const { size, gl } = useThree()
+  const mobile = size.width < 720
+  const material = useRef<THREE.ShaderMaterial>(null)
+  const faceDrag = useRef({ active: false, x: 0, y: 0 })
+  const faceRotation = useRef(new THREE.Vector2())
+  const faceVelocity = useRef(new THREE.Vector2())
+  const neuralEcho = useRef({ origin: new THREE.Vector2(), age: 9, active: false, tracking: false })
+  const tier = useMemo(() => {
+    const device = navigator as Navigator & { deviceMemory?: number }
+    const memory = device.deviceMemory ?? 8
+    const cores = navigator.hardwareConcurrency ?? 8
+    if (mobile) return memory <= 4 || cores <= 4 ? 'mobile-light' : 'mobile-rich'
+    if (memory <= 4 || cores <= 4) return 'desktop-light'
+    if (memory <= 8 || cores <= 8) return 'desktop-balanced'
+    return 'desktop-rich'
+  }, [mobile])
+  const geometry = useMemo(() => {
+    const countByTier = {
+      'mobile-light': 1050,
+      'mobile-rich': 1750,
+      'desktop-light': 3500,
+      'desktop-balanced': 6100,
+      'desktop-rich': 8600,
+    }
+    const count = reducedMotion ? Math.min(1800, countByTier[tier]) : countByTier[tier]
+    const positions = new Float32Array(count * 3)
+    const seeds = new Float32Array(count)
+    const faceTargets = new Float32Array(count * 3)
+    const faceFeatures = new Float32Array(count)
+    const eyeRadii = new Float32Array(count)
+
+    const pickFaceTarget = (index: number) => {
+      let randomState = 0
+      const random = () => {
+        randomState += 0.61803398875
+        const value = Math.sin((index + 1) * 91.739 + randomState * 43758.5453) * 43758.5453
+        return value - Math.floor(value)
+      }
+
+      // The face is sculpted as a deep particle relief derived from the
+      // Calakmul jade mask's visible construction: tessellated stone plates,
+      // angular brows and eye-rims, a raised nose, spiral ear ornaments,
+      // copper mouth crescents, and pale fracture seams. It deliberately
+      // remains a particle interpretation, rather than copying a bitmap.
+      const featureRoll = random()
+      if (featureRoll < 0.06) {
+        // Two small particle discs occupy the deliberately open eye sockets.
+        // They are irises only—there is no added eyeball surface—so their
+        // glow stays embedded in the jade mask rather than feeling cartoonish.
+        const side = random() > 0.5 ? 1 : -1
+        const angle = random() * Math.PI * 2
+        const radius = Math.sqrt(random())
+        // One shallow plane per eye makes a true iris disc rather than a
+        // little blue sphere embedded in the mask.
+        const x = side * (0.84 + Math.cos(angle) * 0.185 * radius)
+        const y = 0.62 + Math.sin(angle) * 0.185 * radius
+        return [x, y, -3.505 + (random() - 0.5) * 0.012, 4] as const
+      }
+      if (featureRoll < 0.12) {
+        const side = random() > 0.5 ? 1 : -1
+        // Two-and-a-half turns create the characteristic coiled jade ear
+        // discs, with the relief advancing toward the camera at the centre.
+        const turn = random() * Math.PI * 5.1
+        const radius = 0.12 + turn / (Math.PI * 5.1) * 0.67
+        const x = side * (2.05 + Math.cos(turn) * radius)
+        const y = -0.04 + Math.sin(turn) * radius * 0.88
+        return [x, y, -4.08 + (1 - radius) * 0.3, 1] as const
+      }
+      if (featureRoll < 0.18) {
+        // The stepped side pieces behind each ear make the silhouette read
+        // like a sculpted mask instead of a floating oval.
+        const side = random() > 0.5 ? 1 : -1
+        const row = Math.floor(random() * 4)
+        const x = side * (2.47 + random() * 0.42)
+        const y = 0.88 - row * 0.38 + (random() - 0.5) * 0.13
+        return [x, y, -4.5 + random() * 0.14, 1] as const
+      }
+      if (featureRoll < 0.28) {
+        const side = random() > 0.5 ? 1 : -1
+        const t = random()
+        // An asymmetric, sloped polygonal brow followed by the sharp eye
+        // rim. A small gold fraction recalls the original eye inlays.
+        const brow = random() > 0.42
+        const x = side * (brow ? 0.32 + t * 1.22 : 0.42 + t * 0.94)
+        const y = brow
+          ? 0.98 - t * 0.3 - Math.abs(t - 0.5) * 0.2
+          : 0.56 + Math.sin(t * Math.PI) * 0.18 - t * 0.12
+        return [x, y, -3.78 + (brow ? 0.06 : 0.18), random() > 0.82 ? 2 : 3] as const
+      }
+      if (featureRoll < 0.38) {
+        // The nose is a tall faceted wedge: narrow high up, rounded and
+        // strongly raised toward its lower point.
+        const y = -0.42 + random() * 1.72
+        const lower = 1 - (y + 0.42) / 1.72
+        const width = 0.1 + lower * 0.38
+        const x = (random() - 0.5) * width * 2
+        return [x, y, -3.44 + lower * 0.2 + Math.abs(x) * 0.22, 1] as const
+      }
+      if (featureRoll < 0.46) {
+        const side = random() > 0.5 ? 1 : -1
+        const t = random()
+        const ornament = random() > 0.43
+        // Copper is reserved for the split moustache bar and the two lower
+        // crescents, keeping the warm metal details precise rather than noisy.
+        const x = side * (ornament ? 0.44 + Math.sin(t * Math.PI) * 0.52 : 0.08 + t * 0.48)
+        const y = ornament ? -1.12 - Math.sin(t * Math.PI) * 0.25 : -0.48 + Math.sin(t * Math.PI) * 0.1
+        return [x, y, -3.7 + Math.cos(t * Math.PI) * 0.07, 2] as const
+      }
+      if (featureRoll < 0.56) {
+        // Fine pale seams across individual jade plates. The points align on
+        // deliberate broken paths, not random noise, so the fragmentation
+        // reads at distance while still resolving up close.
+        const segments = [
+          [-1.82, 1.52, -0.98, 1.2], [-0.98, 1.2, -0.36, 1.5], [0.38, 1.5, 1.22, 1.17], [1.22, 1.17, 1.86, 0.78],
+          [-1.96, 0.72, -1.24, 0.42], [-1.24, 0.42, -1.58, -0.14], [1.94, 0.66, 1.22, 0.3], [1.22, 0.3, 1.58, -0.26],
+          [-1.82, -0.52, -1.16, -0.75], [-1.16, -0.75, -1.42, -1.42], [1.8, -0.5, 1.14, -0.78], [1.14, -0.78, 1.46, -1.48],
+          [-1.36, -1.72, -0.62, -2.1], [-0.62, -2.1, 0.0, -1.86], [0.0, -1.86, 0.72, -2.12], [0.72, -2.12, 1.45, -1.64],
+          [-0.7, 0.08, -1.15, -0.28], [0.72, 0.08, 1.15, -0.28], [-0.88, -1.38, -0.36, -1.6], [0.88, -1.38, 0.36, -1.6],
+        ]
+        const segment = segments[Math.floor(random() * segments.length)]
+        const t = random()
+        const x = THREE.MathUtils.lerp(segment[0], segment[2], t) + (random() - 0.5) * 0.035
+        const y = THREE.MathUtils.lerp(segment[1], segment[3], t) + (random() - 0.5) * 0.035
+        return [x, y, -3.67 + random() * 0.075, 3] as const
+      }
+      if (featureRoll < 0.69) {
+        // The rear headpiece is intentionally set back from the facial
+        // relief. It has an arched crown, a broad cross-band and a small
+        // central crest—the forms visible from the rear and side references.
+        const mode = random()
+        if (mode < 0.48) {
+          const angle = 0.08 + random() * (Math.PI - 0.16)
+          const radius = 0.78 + random() * 0.5
+          return [Math.cos(angle) * radius * 1.16, 2.02 + Math.sin(angle) * radius, -4.82 + random() * 0.1, 0] as const
+        }
+        if (mode < 0.8) {
+          return [(random() - 0.5) * 2.9, 2.0 + (random() - 0.5) * 0.3, -4.88 + random() * 0.1, 0] as const
+        }
+        return [(random() - 0.5) * 0.72, 2.6 + random() * 0.76, -4.94 + random() * 0.1, 0] as const
+      }
+      if (featureRoll < 0.78) {
+        // A deep lower collar/chin is a separate layer, not part of the face
+        // oval. This makes the headpiece read convincingly from a turn.
+        const y = -2.12 - random() * 0.82
+        const width = 1.3 - Math.abs(y + 2.42) * 0.6
+        const x = (random() - 0.5) * Math.max(0.5, width * 2)
+        return [x, y, -4.66 + random() * 0.13, random() > 0.82 ? 3 : 0] as const
+      }
+
+      let x = 0
+      let y = 0
+      let eye = false
+      let mouth = false
+      for (let attempt = 0; attempt < 12; attempt += 1) {
+        const angle = random() * Math.PI * 2
+        const radius = Math.sqrt(random())
+        // A narrower chin and broader forehead make the base silhouette
+        // closer to the original mask than a regular ellipse.
+        const rawY = Math.sin(angle) * radius * 2.32
+        const width = 1.45 + Math.max(0, rawY + 0.35) * 0.26 - Math.max(0, -rawY - 1.35) * 0.42
+        x = Math.cos(angle) * radius * width
+        y = rawY
+        const eyeLevel = 0.52 + (Math.abs(x) - 0.76) * 0.07
+        const eyeWidth = Math.abs(x) > 0.45 && Math.abs(x) < 1.31
+        eye = eyeWidth && Math.abs(y - eyeLevel) < (0.1 + (1.3 - Math.abs(x)) * 0.075)
+        mouth = (x / 0.64) ** 2 + ((y + 0.86) / 0.2) ** 2 < 1
+        if (!eye && !mouth) break
+      }
+      const radial = Math.min(1, (x / 2.05) ** 2 + (y / 2.58) ** 2)
+      const depth = -4.58 + (1 - radial) * 0.62 + (random() - 0.5) * 0.12
+      return [x, y, depth, 0] as const
+    }
+    for (let i = 0; i < count; i += 1) {
+      const layer = i % 13
+      const depth = -0.35 - layer * 1.28 - Math.random() * 1.65
+      positions[i * 3] = (Math.random() - 0.5) * (8.8 + layer * 0.55)
+      positions[i * 3 + 1] = (Math.random() - 0.5) * (5.8 + layer * 0.34)
+      positions[i * 3 + 2] = depth
+      seeds[i] = Math.random()
+      const [x, y, z, feature] = pickFaceTarget(i)
+      faceTargets.set([x, y, z], i * 3)
+      faceFeatures[i] = feature
+      if (feature === 4) eyeRadii[i] = Math.min(1, Math.hypot((Math.abs(x) - 0.84) / 0.185, (y - 0.62) / 0.185))
+    }
+    const result = new THREE.BufferGeometry()
+    result.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    result.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 1))
+    result.setAttribute('aFaceTarget', new THREE.BufferAttribute(faceTargets, 3))
+    result.setAttribute('aFaceFeature', new THREE.BufferAttribute(faceFeatures, 1))
+    result.setAttribute('aEyeRadius', new THREE.BufferAttribute(eyeRadii, 1))
+    return result
+  }, [reducedMotion, tier])
+  const uniforms = useMemo(() => ({
+    uTime: { value: 0 }, uOpacity: { value: 0 }, uDpr: { value: 1 },
+    uPointer: { value: new THREE.Vector2() }, uPointerActive: { value: 0 }, uEyeOpen: { value: 0 }, uFaceDrift: { value: 0 },
+    uEchoOrigin: { value: new THREE.Vector2() }, uEchoAge: { value: 9 },
+    uSwirl: { value: 0 }, uEnergy: { value: 0 }, uTravel: { value: 0 }, uFace: { value: 0 },
+    uFaceRotation: { value: new THREE.Vector2() }, uFaceDisturb: { value: 0 },
+  }), [])
+  useEffect(() => () => geometry.dispose(), [geometry])
+  useEffect(() => {
+    const down = (event: PointerEvent) => {
+      const phase = chapterPhase()
+      if (event.pointerType === 'touch' || event.button !== 0 || phase < 1.14 || phase > 1.88
+        || (event.target instanceof Element && event.target.closest('a, button, input, select, textarea'))) return
+      faceDrag.current = { active: true, x: event.clientX, y: event.clientY }
+      faceVelocity.current.set(0, 0)
+      document.body.style.cursor = 'grabbing'
+    }
+    const move = (event: PointerEvent) => {
+      if (!faceDrag.current.active) return
+      const dx = event.clientX - faceDrag.current.x
+      const dy = event.clientY - faceDrag.current.y
+      faceDrag.current.x = event.clientX
+      faceDrag.current.y = event.clientY
+      faceRotation.current.x = THREE.MathUtils.clamp(faceRotation.current.x + dy * 0.0042, -0.52, 0.52)
+      faceRotation.current.y += dx * 0.0048
+      faceVelocity.current.set(dy * 0.0042, dx * 0.0048)
+    }
+    const up = () => {
+      if (!faceDrag.current.active) return
+      faceDrag.current.active = false
+      document.body.style.cursor = ''
+    }
+    window.addEventListener('pointerdown', down)
+    window.addEventListener('pointermove', move, { passive: true })
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', up)
+    window.addEventListener('blur', up)
+    return () => {
+      window.removeEventListener('pointerdown', down)
+      window.removeEventListener('pointermove', move)
+      window.removeEventListener('pointerup', up)
+      window.removeEventListener('pointercancel', up)
+      window.removeEventListener('blur', up)
+      if (faceDrag.current.active) document.body.style.cursor = ''
+    }
+  }, [])
+  useFrame(({ clock }, delta) => {
+    if (!material.current) return
+    const phase = chapterPhase()
+    const dt = Math.min(delta, 0.1)
+    const live = material.current.uniforms
+    const entering = THREE.MathUtils.smoothstep(phase, 0.42, 0.9)
+    // Preserve the mask while the camera passes through it, then let the
+    // particles disperse into the following scene.
+    const leaving = 1 - THREE.MathUtils.smoothstep(phase, 2.26, 2.56)
+    live.uTime.value = reducedMotion ? 0 : clock.getElapsedTime()
+    live.uOpacity.value = entering * leaving
+    live.uDpr.value = gl.getPixelRatio()
+    live.uPointer.value.copy(motion.current.pointer)
+    live.uSwirl.value = reducedMotion ? 0 : motion.current.swirl
+    live.uEnergy.value = reducedMotion ? 0 : motion.current.energy
+    live.uTravel.value = reducedMotion ? 0 : THREE.MathUtils.smoothstep(phase, 0.72, 1.5)
+    live.uFace.value = THREE.MathUtils.smoothstep(phase, 1.08, 1.68)
+      * (1 - THREE.MathUtils.smoothstep(phase, 2.08, 2.36))
+    // The two irises bloom from their pupils toward the rim, like eyelids
+    // lifting. Keeping this separate from the mask gather lets it feel alive.
+    live.uEyeOpen.value = THREE.MathUtils.smoothstep(phase, 1.33, 1.53)
+      * (1 - THREE.MathUtils.smoothstep(phase, 2.04, 2.22))
+    live.uPointerActive.value = THREE.MathUtils.lerp(live.uPointerActive.value, motion.current.active && !reducedMotion ? 1 : 0, 1 - Math.exp(-Math.min(delta, 0.1) * 3))
+    if (!faceDrag.current.active) {
+      faceRotation.current.add(faceVelocity.current)
+      faceVelocity.current.multiplyScalar(Math.exp(-dt * 4.8))
+    }
+    faceRotation.current.x = THREE.MathUtils.clamp(faceRotation.current.x, -0.52, 0.52)
+    faceRotation.current.y = THREE.MathUtils.euclideanModulo(faceRotation.current.y + Math.PI, Math.PI * 2) - Math.PI
+    // A full, slow reveal lets the neural field emerge through the forehead
+    // before the mask presents its reverse. Hand rotation remains additive.
+    const presentationTurn = reducedMotion ? 0 : THREE.MathUtils.smoothstep(phase, 1.54, 2.28) * Math.PI
+    live.uFaceRotation.value.set(
+      reducedMotion ? 0 : faceRotation.current.x + Math.sin(clock.getElapsedTime() * 0.27) * 0.026,
+      reducedMotion ? 0 : faceRotation.current.y + presentationTurn + Math.sin(clock.getElapsedTime() * 0.19) * 0.05,
+    )
+    const faceActive = phase > 1.12 && phase < 2.14 && motion.current.active && !reducedMotion
+    live.uFaceDisturb.value = THREE.MathUtils.lerp(live.uFaceDisturb.value, faceActive ? 1 : 0, 1 - Math.exp(-dt * 20))
+    const echo = neuralEcho.current
+    if (faceActive) {
+      if (!echo.tracking) {
+        echo.origin.copy(motion.current.pointer)
+        echo.age = 0
+        echo.active = true
+        echo.tracking = true
+      } else {
+        // The emission point follows the hand smoothly rather than waiting for
+        // a distance threshold, keeping the whole interaction continuously alive.
+        echo.origin.lerp(motion.current.pointer, 1 - Math.exp(-dt * 7))
+        echo.age += dt
+        if (echo.age > 4.8) echo.age = 0
+      }
+    } else {
+      echo.tracking = false
+      if (echo.active) echo.age = Math.min(9, echo.age + dt)
+    }
+    if (!faceActive && echo.age > 4.8) echo.active = false
+    live.uEchoOrigin.value.copy(echo.origin)
+    live.uEchoAge.value = echo.age
+    // Leave a little momentum in the field when the pointer stops: disturbed
+    // particles keep slowly settling at the last interaction point.
+    const driftTarget = echo.active ? 1 : 0
+    live.uFaceDrift.value = THREE.MathUtils.lerp(live.uFaceDrift.value, driftTarget, 1 - Math.exp(-dt * (echo.active ? 2.8 : 0.72)))
+  })
+  return <points geometry={geometry} frustumCulled={false}>
+    <shaderMaterial ref={material} transparent depthWrite={false} blending={THREE.AdditiveBlending} uniforms={uniforms} vertexShader={/* glsl */ `
+      attribute float aSeed;
+      attribute vec3 aFaceTarget;
+      attribute float aFaceFeature;
+      attribute float aEyeRadius;
+      uniform float uTime, uDpr, uPointerActive, uSwirl, uEnergy, uTravel, uFace, uFaceDisturb, uEyeOpen, uFaceDrift, uEchoAge;
+      uniform vec2 uPointer, uEchoOrigin;
+      uniform vec2 uFaceRotation;
+      varying float vMix;
+      varying float vFace;
+      varying float vFaceFeature;
+      varying float vHover;
+      varying float vEyeRadius;
+      varying float vEyeOpen;
+      void main() {
+        vec3 p = position;
+        float wave = uTime * (0.17 + aSeed * 0.15);
+        float stream = sin(p.z * 0.23 + aSeed * 18.0 + wave);
+        float angle = (uSwirl * (0.16 + aSeed * 0.26) + p.z * 0.052 + wave * 0.12) * (0.42 + uTravel * 0.72);
+        mat2 rotation = mat2(cos(angle), sin(angle), -sin(angle), cos(angle));
+        p.xy = rotation * p.xy;
+        p.z += uTravel * (1.65 + aSeed * 1.75) + stream * (0.08 + uEnergy * 0.1);
+        p.x += sin(wave + p.z * 0.38) * (0.06 + aSeed * 0.11);
+        p.y += cos(wave * 1.23 + p.x * 0.42) * (0.05 + aSeed * 0.085);
+        // Each particle receives its own small arrival offset. The face is
+        // therefore assembled as a travelling compression, never a switch.
+        float gather = smoothstep(0.0, 1.0, uFace * 1.32 - aSeed * 0.32);
+        vec3 faceTarget = aFaceTarget;
+        // A shallow 3D turn makes the target read as a relief rather than a
+        // flat screen of particles. Drag rotation is intentionally bounded.
+        faceTarget.z += 4.24;
+        mat2 yaw = mat2(cos(uFaceRotation.y), sin(uFaceRotation.y), -sin(uFaceRotation.y), cos(uFaceRotation.y));
+        mat2 pitch = mat2(cos(uFaceRotation.x), sin(uFaceRotation.x), -sin(uFaceRotation.x), cos(uFaceRotation.x));
+        faceTarget.xz = yaw * faceTarget.xz;
+        faceTarget.yz = pitch * faceTarget.yz;
+        faceTarget.z -= 4.24;
+        float vibration = sin(uTime * (1.2 + aSeed * 1.8) + aSeed * 51.0) * 0.016;
+        faceTarget += vec3(cos(aSeed * 39.0), sin(aSeed * 71.0), sin(aSeed * 23.0)) * vibration;
+        p = mix(p, faceTarget, gather);
+        vec4 view = modelViewMatrix * vec4(p, 1.0);
+        vec4 clip = projectionMatrix * view;
+        vec2 faceScreen = clip.xy / max(clip.w, 0.001);
+        vec2 echoVector = (faceScreen - uEchoOrigin) * vec2(1.35, 1.0);
+        // Warp the propagation space independently for each particle. The
+        // resulting cross keeps its directional energy but its edges fragment
+        // and wander like a signal travelling through an uneven material.
+        vec2 signalSpace = echoVector + vec2(
+          sin(echoVector.y * 10.0 + aSeed * 61.0) * 0.065,
+          sin(echoVector.x * 12.0 + aSeed * 47.0) * 0.06
+        );
+        vec2 echoDirection = normalize(signalSpace + vec2(0.0001));
+        // One slow, broken cross opens from the charged contact point. The
+        // separate horizontal and vertical arms take different irregular paths
+        // across the mask rather than creating a recognisable circular ripple.
+        float front = uEchoAge * 0.29;
+        float horizontalArm = exp(-pow((abs(signalSpace.x) - front) / 0.12, 2.0))
+          * (1.0 - smoothstep(0.16, 0.78, abs(signalSpace.y)));
+        float verticalArm = exp(-pow((abs(signalSpace.y) - front) / 0.13, 2.0))
+          * (1.0 - smoothstep(0.14, 0.72, abs(signalSpace.x)));
+        float brokenness = 0.6 + 0.4 * sin(aSeed * 91.0 + signalSpace.x * 24.0 - signalSpace.y * 19.0);
+        float signal = max(horizontalArm, verticalArm) * brokenness * gather;
+        float settle = signal * uFaceDrift;
+        vec2 tangent = vec2(-echoDirection.y, echoDirection.x);
+        view.xy += echoDirection * signal * (0.008 + aSeed * 0.012);
+        view.xy += tangent * signal * sin(aSeed * 47.0) * 0.005;
+        view.z += signal * (0.014 + 0.01 * sin(aSeed * 37.0));
+        // A low-frequency, per-particle offset has a long tail. It feels
+        // like the field is drifting back through vacuum after being moved.
+        view.xy += vec2(sin(uTime * 1.35 + aSeed * 67.0), cos(uTime * 1.08 + aSeed * 41.0)) * settle * (0.018 + aSeed * 0.024);
+        view.z += sin(uTime * 1.7 + aSeed * 29.0) * settle * 0.035;
+        clip = projectionMatrix * view;
+        gl_Position = clip;
+        float seamPoint = step(2.5, aFaceFeature) * (1.0 - step(3.5, aFaceFeature));
+        float irisPoint = step(3.5, aFaceFeature);
+        float irisReveal = smoothstep(aEyeRadius - 0.06, aEyeRadius + 0.22, uEyeOpen - aSeed * 0.055);
+        gl_PointSize = clamp((2.2 + aSeed * 4.8) * uDpr * 7.1 * mix(1.0, 1.0 + signal * 0.5, gather) * mix(1.0, 0.58, seamPoint) * mix(1.0, 1.18 * irisReveal, irisPoint) / max(0.75, -view.z), 1.0 * uDpr, 13.0 * uDpr);
+        vMix = clamp(aSeed + stream * 0.11, 0.0, 1.0);
+        vFace = gather;
+        vFaceFeature = aFaceFeature;
+        vEyeRadius = aEyeRadius;
+        vEyeOpen = irisReveal;
+        vHover = signal;
+      }`} fragmentShader={/* glsl */ `
+      uniform float uOpacity;
+      varying float vMix;
+      varying float vFace;
+      varying float vFaceFeature;
+      varying float vHover;
+      varying float vEyeRadius;
+      varying float vEyeOpen;
+      void main() {
+        float d = length(gl_PointCoord - 0.5);
+        float core = 1.0 - smoothstep(0.0, 0.32, d);
+        float halo = exp(-d * d * 10.0) * 0.42;
+        vec3 jade = mix(vec3(0.10, 0.30, 0.27), vec3(0.48, 0.78, 0.61), vMix);
+        vec3 patina = mix(jade, vec3(0.94, 0.54, 0.22), smoothstep(0.92, 1.0, vMix) * 0.18);
+        // Dark fractured jade, pale jade ornaments, and modest copper
+        // details mirror the supplied mask references without a bitmap asset.
+        float facet = floor(vMix * 6.0) / 5.0;
+        vec3 jadeFace = mix(vec3(0.035, 0.24, 0.20), vec3(0.25, 0.58, 0.47), facet);
+        jadeFace = mix(jadeFace, vec3(0.44, 0.71, 0.56), smoothstep(0.76, 1.0, vMix) * 0.42);
+        vec3 paleJade = mix(vec3(0.22, 0.42, 0.34), vec3(0.52, 0.69, 0.55), vMix);
+        vec3 copper = mix(vec3(0.38, 0.16, 0.07), vec3(0.88, 0.52, 0.23), vMix);
+        float paleFeature = step(0.5, vFaceFeature) * (1.0 - step(1.5, vFaceFeature));
+        float copperFeature = step(1.5, vFaceFeature) * (1.0 - step(2.5, vFaceFeature));
+        float seamFeature = step(2.5, vFaceFeature);
+        float irisFeature = step(3.5, vFaceFeature);
+        vec3 maskColor = mix(jadeFace, paleJade, paleFeature);
+        maskColor = mix(maskColor, copper, copperFeature);
+        maskColor = mix(maskColor, vec3(0.38, 0.62, 0.53), seamFeature);
+        // A cyan-blue rim, lighter inner fibres and a dark centre give the
+        // otherwise abstract particle discs a more convincing iris read.
+        float irisRim = smoothstep(0.52, 0.94, vEyeRadius);
+        float pupil = 1.0 - smoothstep(0.18, 0.36, vEyeRadius);
+        vec3 irisBlue = mix(vec3(0.06, 0.31, 0.62), vec3(0.12, 0.72, 1.0), irisRim);
+        irisBlue = mix(irisBlue, vec3(0.008, 0.022, 0.045), pupil);
+        maskColor = mix(maskColor, irisBlue, irisFeature);
+        // A cool local flash keeps the interaction readable against the
+        // ambient glow without recolouring the resting mask.
+        maskColor = mix(maskColor, vec3(0.56, 0.91, 1.0), clamp(vHover * 0.05, 0.0, 0.05));
+        vec3 color = mix(patina, maskColor, vFace);
+        float eyeFade = mix(1.0, vEyeOpen, irisFeature);
+        gl_FragColor = vec4(color * (core + halo * mix(1.0, 1.8, vFace)) * (1.0 + vHover * 0.05) * mix(1.0, 1.9, irisFeature), (core + halo) * uOpacity * (0.32 + vMix * 0.74) * mix(1.0, 1.34, vFace) * eyeFade);
+      }`} />
+  </points>
 }
 
 type SwarmMotion = { pointer: THREE.Vector2; active: boolean; energy: number; swirl: number }
@@ -586,7 +1239,7 @@ function ParticleSwarm({ motion, reducedMotion }: { motion: RefObject<SwarmMotio
   }, [mobile])
   const uniforms = useMemo(() => ({
     uTime: { value: 0 }, uSwirl: { value: 0 }, uEnergy: { value: 0 },
-    uPointer: { value: new THREE.Vector2() }, uAttract: { value: 0 },
+    uPointer: { value: new THREE.Vector2() }, uRepel: { value: 0 }, uRepelRadius: { value: 1 },
     uAspect: { value: 1 }, uDpr: { value: 1 }, uOpacity: { value: 0 },
   }), [])
   useEffect(() => {
@@ -622,7 +1275,7 @@ function ParticleSwarm({ motion, reducedMotion }: { motion: RefObject<SwarmMotio
   }, [geometry, motion])
   useFrame(({ clock }, delta) => {
     const dt = Math.min(delta, 0.1)
-    motion.current.pointer.lerp(target.current, 1 - Math.exp(-dt * 2))
+    motion.current.pointer.lerp(target.current, 1 - Math.exp(-dt * 20))
     motion.current.active = input.current.active && !reducedMotion
     input.current.pointerEnergy *= Math.exp(-dt * 2.5)
     input.current.scrollEnergy *= Math.exp(-dt * 2)
@@ -634,16 +1287,19 @@ function ParticleSwarm({ motion, reducedMotion }: { motion: RefObject<SwarmMotio
     live.uSwirl.value = reducedMotion ? 0 : motion.current.swirl
     live.uEnergy.value = reducedMotion ? 0 : motion.current.energy
     live.uPointer.value.copy(motion.current.pointer)
-    live.uAttract.value = THREE.MathUtils.lerp(live.uAttract.value, motion.current.active ? 1 : 0, 1 - Math.exp(-dt * 2))
+    live.uRepel.value = THREE.MathUtils.lerp(live.uRepel.value, motion.current.active ? 1 : 0, 1 - Math.exp(-dt * 3.4))
     live.uAspect.value = size.width / Math.max(size.height, 1)
     live.uDpr.value = gl.getPixelRatio()
     const phase = chapterPhase()
-    live.uOpacity.value = THREE.MathUtils.smoothstep(phase, 1.35, 1.8) * (1 - THREE.MathUtils.smoothstep(phase, 2.53, 2.97))
+    // Potential uses a compact cursor sphere so the interaction stays on the
+    // specimen rather than opening across most of the frame.
+    live.uRepelRadius.value = phase > 2.7 && phase < 3.58 ? 0.45 : 1
+    live.uOpacity.value = THREE.MathUtils.smoothstep(phase, 3.12, 3.36) * (1 - THREE.MathUtils.smoothstep(phase, 3.53, 3.97))
   })
   return <points geometry={geometry} frustumCulled={false}>
     <shaderMaterial ref={material} transparent depthWrite={false} blending={THREE.AdditiveBlending} uniforms={uniforms} vertexShader={/* glsl */ `
       attribute float aSeed;
-      uniform float uTime, uSwirl, uEnergy, uAttract, uAspect, uDpr;
+      uniform float uTime, uSwirl, uEnergy, uRepel, uRepelRadius, uAspect, uDpr;
       uniform vec2 uPointer;
       varying float vGlow;
       void main() {
@@ -657,11 +1313,12 @@ function ParticleSwarm({ motion, reducedMotion }: { motion: RefObject<SwarmMotio
         vec2 screen = clip.xy / max(clip.w, 0.001);
         vec2 toward = (uPointer - screen) * vec2(uAspect, 1.0);
         float distanceToPointer = length(toward);
-        float influence = 1.0 - smoothstep(0.12, 1.15, distanceToPointer);
-        float repel = 1.0 - smoothstep(0.0, 0.25, distanceToPointer);
+        float repel = 1.0 - smoothstep(0.06 * uRepelRadius, 0.92 * uRepelRadius, distanceToPointer);
         vec2 direction = toward / max(distanceToPointer, 0.001);
-        vec2 displacement = toward * influence * (0.14 + uEnergy * 0.04) - direction * repel * 0.16;
-        clip.xy += displacement / vec2(uAspect, 1.0) * uAttract * clip.w;
+        // The previous force pulled the field inward like a black hole. This
+        // is a clean, broad outward pressure with a little energy on movement.
+        vec2 displacement = -direction * repel * (0.18 + uEnergy * 0.2);
+        clip.xy += displacement / vec2(uAspect, 1.0) * uRepel * clip.w;
         gl_Position = clip;
         gl_PointSize = clamp((3.5 + aSeed * 3.5) * uDpr * 7.0 / max(1.0, -view.z), 2.0 * uDpr, 10.0 * uDpr);
         vGlow = 0.55 + aSeed * 0.45;
@@ -676,68 +1333,170 @@ function ParticleSwarm({ motion, reducedMotion }: { motion: RefObject<SwarmMotio
   </points>
 }
 
+// A second expression of the new particle language belongs to the specimen:
+// a restrained mineral halo that follows the rotating asteroid without hiding
+// its smoky crystal forms. Keeping this local to the ore group also preserves
+// the Void portrait as its own chapter rather than reusing its silhouette.
+function CrystalParticleAura({ reducedMotion }: { reducedMotion: boolean }) {
+  const { size, gl } = useThree()
+  const mobile = size.width < 720
+  const material = useRef<THREE.ShaderMaterial>(null)
+  const geometry = useMemo(() => {
+    const count = mobile ? 320 : 1200
+    const positions = new Float32Array(count * 3)
+    const seeds = new Float32Array(count)
+    const tones = new Float32Array(count)
+    for (let i = 0; i < count; i += 1) {
+      const angle = Math.random() * Math.PI * 2
+      const radius = 1.28 + Math.pow(Math.random(), 0.62) * 1.55
+      positions[i * 3] = Math.cos(angle) * radius * (0.78 + Math.random() * 0.32)
+      positions[i * 3 + 1] = (Math.random() - 0.46) * (1.7 + radius * 0.76)
+      positions[i * 3 + 2] = Math.sin(angle) * radius * (0.42 + Math.random() * 0.56)
+      seeds[i] = Math.random()
+      tones[i] = Math.random()
+    }
+    const result = new THREE.BufferGeometry()
+    result.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    result.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 1))
+    result.setAttribute('aTone', new THREE.BufferAttribute(tones, 1))
+    return result
+  }, [mobile])
+  const uniforms = useMemo(() => ({ uTime: { value: 0 }, uOpacity: { value: 0 }, uDpr: { value: 1 } }), [])
+  useEffect(() => () => geometry.dispose(), [geometry])
+  useFrame(({ clock }) => {
+    if (!material.current) return
+    const phase = chapterPhase()
+    const entering = THREE.MathUtils.smoothstep(phase, 3.14, 3.36)
+    const leaving = 1 - THREE.MathUtils.smoothstep(phase, 3.54, 3.94)
+    material.current.uniforms.uTime.value = reducedMotion ? 0 : clock.getElapsedTime()
+    material.current.uniforms.uDpr.value = gl.getPixelRatio()
+    material.current.uniforms.uOpacity.value = entering * leaving * (mobile ? 0.58 : 0.76)
+  })
+  return <points geometry={geometry} frustumCulled={false} renderOrder={3}>
+    <shaderMaterial ref={material} transparent depthWrite={false} blending={THREE.AdditiveBlending} uniforms={uniforms} toneMapped={false} vertexShader={/* glsl */ `
+      attribute float aSeed;
+      attribute float aTone;
+      uniform float uTime, uDpr;
+      varying float vTone;
+      void main() {
+        vec3 p = position;
+        float turn = uTime * (0.105 + aSeed * 0.11) + aSeed * 6.28318;
+        mat2 orbit = mat2(cos(turn), sin(turn), -sin(turn), cos(turn));
+        p.xz = orbit * p.xz;
+        p.y += sin(uTime * (0.46 + aSeed * 0.36) + aSeed * 37.0) * (0.08 + aSeed * 0.12);
+        p += normalize(position) * sin(uTime * 0.6 + aSeed * 52.0) * 0.055;
+        vec4 view = modelViewMatrix * vec4(p, 1.0);
+        gl_Position = projectionMatrix * view;
+        gl_PointSize = clamp((1.6 + aSeed * 3.2) * uDpr * 7.0 / max(1.0, -view.z), 1.0 * uDpr, 10.0 * uDpr);
+        vTone = aTone;
+      }
+    `} fragmentShader={/* glsl */ `
+      uniform float uOpacity;
+      varying float vTone;
+      void main() {
+        float d = length(gl_PointCoord - 0.5);
+        float core = 1.0 - smoothstep(0.0, 0.3, d);
+        float halo = exp(-d * d * 12.0) * 0.34;
+        vec3 ice = mix(vec3(0.44, 0.67, 0.71), vec3(0.83, 0.94, 0.98), vTone);
+        vec3 ember = vec3(0.92, 0.40, 0.17);
+        vec3 color = mix(ice, ember, smoothstep(0.91, 1.0, vTone));
+        gl_FragColor = vec4(color * (core + halo), (core + halo) * uOpacity);
+      }
+    `} />
+  </points>
+}
 
-function CameraDirector({ reducedMotion, neuralGroup, oreGroup, crystalTip, motion }: { reducedMotion: boolean; neuralGroup: RefObject<THREE.Group | null>; oreGroup: RefObject<THREE.Group | null>; crystalTip: RefObject<THREE.Object3D | null>; motion: RefObject<SwarmMotion> }) {
+
+function CameraDirector({ reducedMotion, oreGroup, motion }: { reducedMotion: boolean; oreGroup: RefObject<THREE.Group | null>; motion: RefObject<SwarmMotion> }) {
   const { camera } = useThree()
   const currentLook = useRef(new THREE.Vector3())
   const targetPosition = useRef(new THREE.Vector3())
   const targetLook = useRef(new THREE.Vector3())
-  const mindPosition = useMemo(() => new THREE.Vector3(1.1, 0.08, 4.15), [])
-  const orePosition = useMemo(() => new THREE.Vector3(-0.42, 0.08, 7.2), [])
+  const voidPosition = useMemo(() => new THREE.Vector3(0, 0.05, 2.9), [])
+  // Frame the complete mask—rear crown through lower collar—once it has
+  // gathered. The nearby camera is still used during the travelling swarm.
+  const facePosition = useMemo(() => new THREE.Vector3(0, 0.28, 4.15), [])
+  // Hold the mask and brain together, then continue forward through the
+  // neural volume toward the specimen waiting in the same direction.
+  const mindPosition = useMemo(() => new THREE.Vector3(0, 1.02, 4.12), [])
+  const mindApproachPosition = useMemo(() => new THREE.Vector3(0.08, 1.5, 1.45), [])
+  const mindInnerPosition = useMemo(() => new THREE.Vector3(-0.14, 1.62, -2.65), [])
+  const mindCrossPosition = useMemo(() => new THREE.Vector3(0.16, 1.54, -4.82), [])
+  const mindExitPosition = useMemo(() => new THREE.Vector3(-0.16, 1.32, -7.55), [])
+  const asteroidDistantPosition = useMemo(() => new THREE.Vector3(-0.06, 1.32, -7.62), [])
+  const asteroidNearPosition = useMemo(() => new THREE.Vector3(0.48, 1.06, -12.66), [])
   const signalPosition = useMemo(() => new THREE.Vector3(0, 0, 6.3), [])
   const signalLook = useMemo(() => new THREE.Vector3(0, 0, 0), [])
-  const mindLook = useMemo(() => new THREE.Vector3(2.05, 0, -0.65), [])
-  const oreLook = useMemo(() => new THREE.Vector3(1.45, 0.45, 0), [])
-  const anchorWorld = useMemo(() => new THREE.Vector3(), [])
-  const closePosition = useMemo(() => new THREE.Vector3(), [])
-  const closeOffset = useMemo(() => new THREE.Vector3(0.025, 0.015, 0.32), [])
+  const voidLook = useMemo(() => new THREE.Vector3(0, 0, -5.8), [])
+  const faceLook = useMemo(() => new THREE.Vector3(0, 0.24, -4.25), [])
+  const mindLook = useMemo(() => new THREE.Vector3(0, 1.62, -4.68), [])
+  const mindApproachLook = useMemo(() => new THREE.Vector3(0.02, 1.6, -4.72), [])
+  const mindInnerLook = useMemo(() => new THREE.Vector3(-0.08, 1.58, -5.0), [])
+  const mindCrossLook = useMemo(() => new THREE.Vector3(0.12, 1.48, -5.7), [])
+  const mindExitLook = useMemo(() => new THREE.Vector3(0.42, 1.12, -14.5), [])
+  const oreLook = useMemo(() => new THREE.Vector3(0.42, 1.12, -14.5), [])
   const oreCenter = useMemo(() => new THREE.Vector3(), [])
-  const oreDirection = useMemo(() => new THREE.Vector3(), [])
-  const oreDetail = useMemo(() => new THREE.Vector3(), [])
-  const oreClosePosition = useMemo(() => new THREE.Vector3(), [])
   useFrame(({ clock }, delta) => {
     const phase = chapterPhase()
-    const transitionOne = THREE.MathUtils.smoothstep(phase, 0.35, 0.95)
-    const transitionTwo = THREE.MathUtils.smoothstep(phase, 1.2, 1.7)
-    const returnToSignal = THREE.MathUtils.smoothstep(phase, 2.55, 3)
-    targetPosition.current.copy(signalPosition).lerp(mindPosition, transitionOne).lerp(orePosition, transitionTwo).lerp(signalPosition, returnToSignal)
-    targetLook.current.copy(signalLook).lerp(mindLook, transitionOne).lerp(oreLook, transitionTwo).lerp(signalLook, returnToSignal)
+    const transitionVoid = THREE.MathUtils.smoothstep(phase, 0.32, 0.94)
+    const faceFocus = THREE.MathUtils.smoothstep(phase, 1.14, 1.58)
+      * (1 - THREE.MathUtils.smoothstep(phase, 2.08, 2.3))
+    const transitionMind = THREE.MathUtils.smoothstep(phase, 2.08, 2.32)
+    const transitionOre = THREE.MathUtils.smoothstep(phase, 3.0, 3.14)
+    const returnToSignal = THREE.MathUtils.smoothstep(phase, 3.82, 4)
+    targetPosition.current.copy(signalPosition).lerp(voidPosition, transitionVoid).lerp(mindPosition, transitionMind).lerp(asteroidDistantPosition, transitionOre).lerp(signalPosition, returnToSignal)
+    targetLook.current.copy(signalLook).lerp(voidLook, transitionVoid).lerp(mindLook, transitionMind).lerp(oreLook, transitionOre).lerp(signalLook, returnToSignal)
+    targetPosition.current.lerp(facePosition, faceFocus)
+    targetLook.current.lerp(faceLook, faceFocus)
     if (!reducedMotion) {
-      const bridge = signalDeparture(phase)
-      const push = Math.sin(Math.PI * THREE.MathUtils.smoothstep(bridge, 0.1, 1))
-      if (phase > 2) targetPosition.current.z -= push * 1.5
-      let closeUp = 0
-      if (phase < 1 && neuralGroup.current) {
-        neuralGroup.current.updateWorldMatrix(true, false)
-        anchorWorld.copy(NEURON_ANCHOR)
-        neuralGroup.current.localToWorld(anchorWorld)
-        closePosition.copy(anchorWorld).add(closeOffset)
-        closeUp = THREE.MathUtils.smoothstep(phase, 0.32, 0.57) * (1 - THREE.MathUtils.smoothstep(phase, 0.67, 1.0))
-        targetPosition.current.lerp(closePosition, closeUp)
-        targetLook.current.lerp(anchorWorld, closeUp)
+      // A continuous forward flight: crown, neural interior, exit, then the
+      // distant asteroid. Every position now shares the same depth axis.
+      if (phase > 2.32 && phase < 3.02) {
+        const tour = THREE.MathUtils.clamp((phase - 2.32) / 0.7, 0, 1)
+        if (tour < 0.24) {
+          const amount = THREE.MathUtils.smoothstep(tour, 0, 0.24)
+          targetPosition.current.copy(mindPosition).lerp(mindApproachPosition, amount)
+          targetLook.current.copy(mindLook).lerp(mindApproachLook, amount)
+        } else if (tour < 0.56) {
+          const amount = THREE.MathUtils.smoothstep(tour, 0.24, 0.56)
+          targetPosition.current.copy(mindApproachPosition).lerp(mindInnerPosition, amount)
+          targetLook.current.copy(mindApproachLook).lerp(mindInnerLook, amount)
+        } else if (tour < 0.82) {
+          const amount = THREE.MathUtils.smoothstep(tour, 0.56, 0.82)
+          targetPosition.current.copy(mindInnerPosition).lerp(mindCrossPosition, amount)
+          targetLook.current.copy(mindInnerLook).lerp(mindCrossLook, amount)
+        } else {
+          const amount = THREE.MathUtils.smoothstep(tour, 0.82, 1)
+          targetPosition.current.copy(mindCrossPosition).lerp(mindExitPosition, amount)
+          targetLook.current.copy(mindCrossLook).lerp(mindExitLook, amount)
+        }
       }
-      if (phase >= 1 && phase < 2 && oreGroup.current && crystalTip.current) {
-        // Follow the real tip of the main crystal through the specimen's
-        // rotation, then pull back into the established final composition.
+      let closeUp = 0
+      if (phase >= 3 && phase < 3.82 && oreGroup.current) {
+        // The asteroid begins as a small far object. Scroll advances the
+        // camera toward its real rotating world position until it fills frame.
         oreGroup.current.getWorldPosition(oreCenter)
-        oreDirection.copy(orePosition).sub(oreCenter).normalize()
-        crystalTip.current.getWorldPosition(oreDetail)
-        oreDetail.y -= 0.14
-        oreClosePosition.copy(oreDetail).addScaledVector(oreDirection, 1.35)
-        const oreCloseUp = THREE.MathUtils.smoothstep(phase, 1.6, 1.76)
-          * (1 - THREE.MathUtils.smoothstep(phase, 1.8, 2.0))
-        targetPosition.current.lerp(oreClosePosition, oreCloseUp)
-        targetLook.current.lerp(oreDetail, oreCloseUp)
-        closeUp = Math.max(closeUp, oreCloseUp)
+        const oreCloseUp = THREE.MathUtils.smoothstep(phase, 3.02, 3.66)
+        targetPosition.current.copy(asteroidDistantPosition).lerp(asteroidNearPosition, oreCloseUp)
+        targetLook.current.copy(oreLook).lerp(oreCenter, 0.72)
+        closeUp = oreCloseUp
       }
       const pointer = motion.current.pointer
       const parallax = motion.current.active ? 1 : 0
       // In Potential, move the viewpoint around the specimen while keeping the
       // camera aimed near it. Different position/look offsets create depth
       // instead of simply sliding the entire composition across the screen.
-      const oreParallax = THREE.MathUtils.smoothstep(phase, 1.75, 2.05) * (1 - returnToSignal)
+      const voidParallax = THREE.MathUtils.smoothstep(phase, 0.62, 1.08) * (1 - THREE.MathUtils.smoothstep(phase, 1.78, 2.05))
+      const oreParallax = THREE.MathUtils.smoothstep(phase, 3.02, 3.32) * (1 - returnToSignal)
+      const voidTravel = THREE.MathUtils.smoothstep(phase, 0.74, 1.38)
+        * (1 - THREE.MathUtils.smoothstep(phase, 1.36, 1.66)) * (1 - faceFocus)
+      targetPosition.current.z -= voidTravel * 1.15
+      targetPosition.current.x += pointer.x * 0.9 * voidParallax * parallax
+      targetPosition.current.y += pointer.y * 0.58 * voidParallax * parallax
+      targetLook.current.x += pointer.x * 0.4 * voidParallax * parallax
+      targetLook.current.y += pointer.y * 0.27 * voidParallax * parallax
       targetPosition.current.x += pointer.x * THREE.MathUtils.lerp(0.36, 1.05, oreParallax) * parallax * (1 - closeUp)
-      targetPosition.current.y += (pointer.y * THREE.MathUtils.lerp(0.24, 0.7, oreParallax) * parallax + Math.sin(phase * Math.PI * 2 / 3) * 0.25) * (1 - closeUp)
+      targetPosition.current.y += (pointer.y * THREE.MathUtils.lerp(0.24, 0.7, oreParallax) * parallax + Math.sin(phase * Math.PI / 2) * 0.25) * (1 - closeUp)
       targetLook.current.x += pointer.x * THREE.MathUtils.lerp(0.16, 0.12, oreParallax) * parallax * (1 - closeUp)
       targetLook.current.y += pointer.y * THREE.MathUtils.lerp(0.1, 0.08, oreParallax) * parallax * (1 - closeUp)
       targetPosition.current.z += Math.sin(clock.getElapsedTime() * 0.45) * 0.13 * (1 - closeUp)
@@ -815,16 +1574,18 @@ function configureOreScan(shader: THREE.WebGLProgramParametersWithUniforms, unif
       float pulse = 0.0;
       for (int i = 0; i < 12; i++) {
         float age = uScans[i].w;
-        vec3 offset = abs(vScanWorld - uScans[i].xyz);
-        // A wider rectangular wavefront, with depth included so it follows the surface.
-        float scanDistance = max(max(offset.x / 1.35, offset.y), offset.z);
+        vec3 offset = vScanWorld - uScans[i].xyz;
+        // A compact, upright ellipsoid follows the real hit point. Keeping
+        // the vertical axis longer makes the cursor scan read as a portrait
+        // ellipse on the mineral instead of a large spherical bloom.
+        float scanDistance = length(offset / vec3(0.58, 1.12, 0.66));
         float fade = smoothstep(0.0, 0.08, age) * (1.0 - smoothstep(0.24, ${ORE_RIPPLE_LIFETIME.toFixed(1)}, age));
-        float scanRadius = age * 0.55;
-        float ringDistance = (scanDistance - scanRadius) / 0.08;
+        float scanRadius = age * 0.38;
+        float ringDistance = (scanDistance - scanRadius) / 0.06;
         float ring = exp(-ringDistance * ringDistance);
         pulse = max(pulse, ring * fade);
-        float reached = 1.0 - smoothstep(scanRadius, scanRadius + 0.18, scanDistance);
-        scanArea = max(scanArea, reached * fade * (1.0 - smoothstep(0.45, 1.35, scanDistance)));
+        float reached = 1.0 - smoothstep(scanRadius, scanRadius + 0.12, scanDistance);
+        scanArea = max(scanArea, reached * fade * (1.0 - smoothstep(0.32, 0.82, scanDistance)));
       }
       vec3 scanWeights = pow(abs(normalize(vScanNormal)), vec3(4.0));
       scanWeights /= max(scanWeights.x + scanWeights.y + scanWeights.z, 0.001);
@@ -1086,13 +1847,13 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
 
   useFrame(({ clock, camera }, delta) => {
     const phase = chapterPhase()
-    const p = Math.min(phase / 2, 1)
-    const visible = THREE.MathUtils.smoothstep(phase, 1.38, 1.84) * (1 - THREE.MathUtils.smoothstep(phase, 2.53, 2.97))
+    const p = Math.min(phase / 3, 1)
+    const visible = THREE.MathUtils.smoothstep(phase, 2.98, 3.16) * (1 - THREE.MathUtils.smoothstep(phase, 3.8, 3.98))
     const t = clock.getElapsedTime()
     if (glint.current) {
       // Peak at the closest point of the crystal-tip camera move, fading in
       // and out with scroll progress (including when scrolling backwards).
-      const sparkle = reducedMotion ? 0 : THREE.MathUtils.smoothstep(phase, 1.64, 1.75) * (1 - THREE.MathUtils.smoothstep(phase, 1.82, 1.94))
+      const sparkle = reducedMotion ? 0 : THREE.MathUtils.smoothstep(phase, 3.18, 3.28) * (1 - THREE.MathUtils.smoothstep(phase, 3.36, 3.48))
       const material = glint.current.material as THREE.SpriteMaterial
       material.opacity = sparkle * visible * 0.9
       glint.current.scale.setScalar(0.16 + sparkle * 0.14)
@@ -1105,16 +1866,16 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
         spinVelocity.current.multiplyScalar(0.94)
       }
       spin.current.x = THREE.MathUtils.clamp(spin.current.x, -1.2, 1.2)
-      const scrollTurn = reducedMotion ? 0 : THREE.MathUtils.smoothstep(phase, 1.35, 2.55)
+      const scrollTurn = reducedMotion ? 0 : THREE.MathUtils.smoothstep(phase, 3.04, 3.7)
       group.current.rotation.y = t * 0.12 + p * Math.PI * 1.5 + scrollTurn * Math.PI * 1.35 + spin.current.y
       group.current.rotation.x = 0.12 + Math.sin(t * 0.3) * 0.06 + (p - 0.8) * 0.4 + scrollTurn * 0.25 + spin.current.x
-      const revealDrift = reducedMotion ? 0 : THREE.MathUtils.smoothstep(phase, 1.25, 1.5) * (1 - THREE.MathUtils.smoothstep(phase, 1.65, 2))
-      outer.current.position.x = (mobile ? 1.25 : 2.75) - revealDrift * 0.35
-      outer.current.position.y = -0.38 + Math.sin(t * 0.6) * 0.08 + (0.8 - p) * 0.9
-      outer.current.scale.setScalar((mobile ? 0.744 : 1.14) * (0.7 + visible * 0.3))
+      const revealDrift = reducedMotion ? 0 : THREE.MathUtils.smoothstep(phase, 3.06, 3.23) * (1 - THREE.MathUtils.smoothstep(phase, 3.34, 3.52))
+      outer.current.position.x = (mobile ? 0.32 : 0.48) - revealDrift * 0.18
+      outer.current.position.y = 1.12 + Math.sin(t * 0.6) * 0.08
+      outer.current.scale.setScalar((mobile ? 0.74 : 1.1) * (0.7 + visible * 0.3))
       raycaster.setFromCamera(mouse.current, camera)
       const wasHit = hit.current
-      const intersections = phase >= 1.9 && visible > 0.5 ? raycaster.intersectObject(group.current, true) : []
+      const intersections = phase >= 3.08 && visible > 0.5 ? raycaster.intersectObject(group.current, true) : []
       hit.current = intersections.length > 0
       if (hit.current && !wasHit && pointerKind.current !== 'touch') window.dispatchEvent(new Event('ore-crystal-hover'))
       if (!hit.current && wasHit) window.dispatchEvent(new Event('ore-crystal-leave'))
@@ -1163,7 +1924,7 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
     // Small fragments can fill the frame from the close-up camera. Introduce
     // them only as the specimen pulls back into its inspectable final view.
     rubbleMaterials.current.forEach((material) => {
-      material.opacity = visible * THREE.MathUtils.smoothstep(phase, 1.75, 1.98)
+      material.opacity = visible * THREE.MathUtils.smoothstep(phase, 2.75, 2.98)
     })
     // Fade in the rear light only with the specimen; retain the original key
     // light elsewhere so this pass does not change the other chapters.
@@ -1173,7 +1934,7 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
   })
 
   const keep = (material: THREE.Material | null) => { if (material && !materials.current.includes(material)) materials.current.push(material) }
-  return <group ref={outer} position={[mobile ? 1.25 : 2.75, -0.38, -0.35]}>
+  return <group ref={outer} position={[mobile ? 0.32 : 0.48, 1.12, -14.5]}>
     <group ref={group}>
       <mesh geometry={scene.rock}>
         <meshStandardMaterial ref={keep} color="#262827" envMap={envMap} envMapIntensity={0.35} roughness={0.94} metalness={0.08} onBeforeCompile={rockShader} flatShading transparent opacity={0} />
@@ -1193,6 +1954,7 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
         <dodecahedronGeometry args={[1, 0]} />
         <meshStandardMaterial ref={(material) => { keep(material); if (material) rubbleMaterials.current[index] = material }} color="#4a4f52" roughness={0.9} metalness={0.3} flatShading transparent opacity={0} />
       </mesh>)}
+      <CrystalParticleAura reducedMotion={reducedMotion} />
     </group>
     <pointLight ref={oreKeyLight} position={[1.4, 2.4, 2.2]} intensity={7} color="#eef4ff" distance={7} />
     <pointLight ref={oreRimLight} position={[-1.7, 1.1, -1.7]} intensity={0} color="#b7d8f2" distance={5.5} decay={2} />
@@ -1287,61 +2049,7 @@ class CanvasBoundary extends Component<{ children: ReactNode }, { failed: boolea
   }
 }
 
-function OreButtonAnchor({ oreGroup, buttonAnchor }: { oreGroup: RefObject<THREE.Group | null>; buttonAnchor: RefObject<HTMLSpanElement | null> }) {
-  const point = useMemo(() => new THREE.Vector3(), [])
-  const dimensions = useRef({ width: 0, height: 0 })
-  const position = useRef<THREE.Vector2 | null>(null)
-  const motionPreference = useMemo(() => window.matchMedia('(prefers-reduced-motion: reduce)'), [])
-  useEffect(() => {
-    const element = buttonAnchor.current
-    if (!element) return
-    const measure = () => { dimensions.current = { width: element.offsetWidth, height: element.offsetHeight } }
-    measure()
-    const observer = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(measure) : null
-    observer?.observe(element)
-    window.addEventListener('resize', measure)
-    return () => {
-      observer?.disconnect()
-      window.removeEventListener('resize', measure)
-      element.classList.remove('is-world-anchored')
-      element.style.opacity = ''
-      element.style.pointerEvents = ''
-    }
-  }, [buttonAnchor])
-  useFrame(({ camera, size }, delta) => {
-    const element = buttonAnchor.current
-    if (!element || !oreGroup.current) return
-    const phase = chapterPhase()
-    const visibility = THREE.MathUtils.smoothstep(phase, 1.78, 1.98) * (1 - THREE.MathUtils.smoothstep(phase, 2.48, 2.7))
-    element.classList.add('is-world-anchored')
-    element.style.opacity = `${visibility}`
-    element.style.pointerEvents = visibility > 0.95 ? 'auto' : 'none'
-    const link = element.querySelector('a')
-    if (link) link.tabIndex = visibility > 0.95 ? 0 : -1
-    // A billboard-like point in world space beside the specimen. The DOM link
-    // remains accessible and clickable while following the actual 3D camera.
-    oreGroup.current.getWorldPosition(point)
-    point.x += 0.2
-    point.y -= size.width < 720 ? 0.55 : 0.35
-    point.project(camera)
-    const halfWidth = dimensions.current.width / 2 + 16
-    const halfHeight = dimensions.current.height / 2 + (size.width < 720 ? 94 : 60)
-    const x = THREE.MathUtils.clamp((point.x * 0.5 + 0.5) * size.width, halfWidth, size.width - halfWidth)
-    const y = THREE.MathUtils.clamp((-point.y * 0.5 + 0.5) * size.height, halfHeight, size.height - halfHeight)
-    if (!position.current) position.current = new THREE.Vector2(x, y)
-    else if (visibility < 0.01 || motionPreference.matches) position.current.set(x, y)
-    else {
-      const damping = 1 - Math.exp(-Math.min(delta, 0.1) * 6)
-      position.current.x = THREE.MathUtils.lerp(position.current.x, x, damping)
-      position.current.y = THREE.MathUtils.lerp(position.current.y, y, damping)
-    }
-    element.style.setProperty('--world-x', `${position.current.x}px`)
-    element.style.setProperty('--world-y', `${position.current.y}px`)
-  })
-  return null
-}
-
-function SignalCanvas({ reducedMotion, documentVisible, buttonAnchor }: { reducedMotion: boolean; documentVisible: boolean; buttonAnchor: RefObject<HTMLSpanElement | null> }) {
+function SignalCanvas({ reducedMotion, documentVisible }: { reducedMotion: boolean; documentVisible: boolean }) {
   const [contextLost, setContextLost] = useState(false)
   const neuralGroup = useRef<THREE.Group>(null)
   const oreGroup = useRef<THREE.Group>(null)
@@ -1351,6 +2059,7 @@ function SignalCanvas({ reducedMotion, documentVisible, buttonAnchor }: { reduce
     uRepelPointer: { value: new THREE.Vector2() },
     uRepelAspect: { value: 1 },
     uRepelStrength: { value: 0 },
+    uMindGlow: { value: 0 },
   }), [])
   if (contextLost) return <div className="canvas-fallback" />
   return (
@@ -1370,12 +2079,12 @@ function SignalCanvas({ reducedMotion, documentVisible, buttonAnchor }: { reduce
       <ScrollMotion reducedMotion={reducedMotion} />
       <DigitalRain reducedMotion={reducedMotion} />
       <RepulsionController uniforms={repulsion} reducedMotion={reducedMotion} />
+      <VoidField motion={swarmMotion} reducedMotion={reducedMotion} />
       <ParticleSwarm motion={swarmMotion} reducedMotion={reducedMotion} />
       <CosmicParticles repulsion={repulsion} />
       <OreCrystal group={oreGroup} crystalTip={crystalTip} reducedMotion={reducedMotion} />
-      <NeuralNetwork group={neuralGroup} oreGroup={oreGroup} repulsion={repulsion} reducedMotion={reducedMotion} />
-      <CameraDirector reducedMotion={reducedMotion} neuralGroup={neuralGroup} oreGroup={oreGroup} crystalTip={crystalTip} motion={swarmMotion} />
-      <OreButtonAnchor oreGroup={oreGroup} buttonAnchor={buttonAnchor} />
+      <NeuralNetwork group={neuralGroup} repulsion={repulsion} reducedMotion={reducedMotion} />
+      <CameraDirector reducedMotion={reducedMotion} oreGroup={oreGroup} motion={swarmMotion} />
       <RenderOnScroll enabled={reducedMotion && documentVisible} />
     </Canvas>
   )
@@ -1383,7 +2092,7 @@ function SignalCanvas({ reducedMotion, documentVisible, buttonAnchor }: { reduce
 
 function useScrollProgress() {
   useEffect(() => {
-    // Chapter three is copied above chapter one and chapter one below chapter three, so the page can jump
+    // Potential is copied above Signal and Signal below Potential, so the page can jump
     // by one loop period at either seam without a visible change and without ever reaching the document edges.
     const seams = () => {
       const start = document.getElementById('signal')?.offsetTop ?? 0
@@ -1418,20 +2127,17 @@ function useIdleJourney(reducedMotion: boolean) {
     if (reducedMotion) return
     let lastInteraction = performance.now()
     let lastFrame = 0
-    let remainder = 0
     let frame = 0
-    const pause = () => { lastInteraction = performance.now(); remainder = 0 }
+    const pause = () => { lastInteraction = performance.now() }
     const tick = (now: number) => {
       const dt = lastFrame ? Math.min((now - lastFrame) / 1000, 0.05) : 0
       lastFrame = now
       const focused = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
       if (!document.hidden && !focused && now - lastInteraction > 5000) {
-        remainder += dt * 6 // pixels per second, independent of display refresh rate
-        const pixels = Math.floor(remainder)
-        if (pixels) {
-          remainder -= pixels
-          window.scrollBy({ top: pixels, behavior: 'instant' })
-        }
+        // Keep the idle journey sub-pixel and time-based. Rounding it to
+        // whole pixels made the automatic travel—and sticky text—appear to
+        // advance in little frames on high-refresh displays.
+        window.scrollBy({ top: dt * 7.5, behavior: 'instant' })
       }
       frame = requestAnimationFrame(tick)
     }
@@ -1486,13 +2192,13 @@ function SoundToggle() {
     const update = () => {
       const phase = chapterPhase()
       sound.current?.update(phase)
-      const closeUpReached = (lastAudioPhase < 1.75 && phase >= 1.75 && phase < 2)
-        || (lastAudioPhase > 1.82 && phase <= 1.82 && phase > 1)
+      const closeUpReached = (lastAudioPhase < 2.75 && phase >= 2.75 && phase < 3)
+        || (lastAudioPhase > 2.82 && phase <= 2.82 && phase > 2)
       if (closeUpReached && !motionPreference.matches && !document.hidden && performance.now() - lastCrystalZoom > 2000) {
         sound.current?.crystalZoom()
         lastCrystalZoom = performance.now()
       }
-      const difference = Math.abs(((phase - lastAudioPhase + 4.5) % 3) - 1.5)
+      const difference = Math.abs(((phase - lastAudioPhase + 6) % 4) - 2)
       const departure = signalDeparture(phase)
       const presence = THREE.MathUtils.smoothstep(departure, 0.12, 0.42) * (1 - THREE.MathUtils.smoothstep(departure, 0.8, 0.98))
       sound.current?.glyphZoom(motionPreference.matches || document.hidden ? 0 : presence * Math.min(1, difference * 90))
@@ -1509,7 +2215,7 @@ function SoundToggle() {
       if (event.pointerType === 'touch' || motionPreference.matches || document.hidden) return
       const now = performance.now()
       const phase = chapterPhase()
-      if (lastPointer && phase >= 0.75 && phase <= 1.45) {
+      if (lastPointer && phase >= 1.75 && phase <= 2.45) {
         const distance = Math.hypot(event.clientX - lastPointer.x, event.clientY - lastPointer.y)
         const elapsed = now - lastPointer.time
         if (distance > 0 && elapsed < 250) {
@@ -1526,24 +2232,24 @@ function SoundToggle() {
     }
     const networkIdle = window.setInterval(() => {
       const phase = chapterPhase()
-      if (lastNetworkMotion && (performance.now() - lastNetworkMotion > 220 || phase < 0.75 || phase > 1.45 || motionPreference.matches)) stopNetwork()
+      if (lastNetworkMotion && (performance.now() - lastNetworkMotion > 220 || phase < 1.75 || phase > 2.45 || motionPreference.matches)) stopNetwork()
     }, 100)
     const pointerLeave = (event: PointerEvent) => { if (!event.relatedTarget) stopNetwork() }
-    const thresholds = [0.55, 1.52, 2.55]
+    const thresholds = [0.55, 1.52, 2.52, 3.55]
     const armed = thresholds.map(() => true)
     let previousPhase = rawChapterPhase()
     let lastTransition = 0
     const transition = () => {
       const phase = rawChapterPhase()
       let delta = phase - previousPhase
-      // The loop seam goes from 3 back to 0, not across the whole timeline.
-      if (delta > 1.5) delta -= 3
-      if (delta < -1.5) delta += 3
+      // The loop seam goes from 4 back to 0, not across the whole timeline.
+      if (delta > 2) delta -= 4
+      if (delta < -2) delta += 4
       const next = previousPhase + delta
       thresholds.forEach((threshold, index) => {
         const distance = Math.abs(phase - threshold)
-        if (Math.min(distance, 3 - distance) > 0.12) armed[index] = true
-        const crossed = [-3, 0, 3].some((offset) => {
+        if (Math.min(distance, 4 - distance) > 0.12) armed[index] = true
+        const crossed = [-4, 0, 4].some((offset) => {
           const boundary = threshold + offset
           return delta > 0 ? previousPhase < boundary && next >= boundary : previousPhase > boundary && next <= boundary
         })
@@ -1639,15 +2345,15 @@ export function Experience() {
   useScrollProgress()
   const { reducedMotion, documentVisible } = useRenderPreferences()
   useIdleJourney(reducedMotion)
-  const buttonAnchor = useRef<HTMLSpanElement>(null)
   return (
     <main>
-      <div className="webgl-shell" aria-hidden="true"><CanvasBoundary><SignalCanvas reducedMotion={reducedMotion} documentVisible={documentVisible} buttonAnchor={buttonAnchor} /></CanvasBoundary></div>
+      <div className="webgl-shell" aria-hidden="true"><CanvasBoundary><SignalCanvas reducedMotion={reducedMotion} documentVisible={documentVisible} /></CanvasBoundary></div>
       <header className="chrome">
         <a className="brand" href="#signal" aria-label="Claude Expert home">claude<span>.expert</span></a>
         <div className="chrome-controls">
           <nav aria-label="Chapters">
             <a className="is-active" href="#signal">Signal</a>
+            <a href="#void">Void</a>
             <a href="#mind">Mind</a>
             <a href="#potential">Potential</a>
           </nav>
@@ -1658,11 +2364,14 @@ export function Experience() {
       <PotentialChapter id="lead" hidden />
       <SignalChapter id="signal" />
 
-      <section id="mind" className="chapter mind" aria-label="Chapter two: Mind">
-        <p>Mind</p>
-        <div><RainHeadline lines={['When applied', 'it becomes Value']} /><span className="mind-caption">Connecting the right dots</span></div>
+      <section id="void" className="chapter void" aria-label="Chapter two: Void">
       </section>
-      <PotentialChapter id="potential" buttonAnchor={buttonAnchor} />
+
+      <section id="mind" className="chapter mind" aria-label="Chapter three: Mind">
+        <p>Mind</p>
+        <div><RainHeadline lines={['Connect', 'the dots']} /></div>
+      </section>
+      <PotentialChapter id="potential" />
       <SignalChapter id="loop" hidden />
     </main>
   )
@@ -1695,13 +2404,13 @@ function RainHeadline({ lines, hero = false, onReveal }: { lines: string[]; hero
   return hero ? <h1 ref={heading} className={className} aria-label={label}>{content}</h1> : <h2 ref={heading} className={className} aria-label={label}>{content}</h2>
 }
 
-// Chapter one, rendered twice: once at the top and once after chapter three as the seam for the infinite loop.
+// Chapter one, rendered twice: once at the top and once after Potential as the seam for the infinite loop.
 function SignalChapter({ id, hidden = false }: { id: string; hidden?: boolean }) {
   return (
       <section id={id} className="chapter signal" aria-hidden={hidden || undefined}>
         <div className="chapter-index">Signal</div>
         <div className="hero-copy">
-          <RainHeadline hero lines={['Knowledge', 'is abundant.']} />
+          <RainHeadline hero lines={['Learn to build', 'this in one day']} />
           <p className="deck">Every breakthrough starts as a small, living pattern inside the noise.</p>
         </div>
         <div className="scroll-prompt">Scroll to decode</div>
@@ -1709,14 +2418,14 @@ function SignalChapter({ id, hidden = false }: { id: string; hidden?: boolean })
   )
 }
 
-// Chapter three, rendered twice: once in place and once above chapter one as the seam for scrolling upward.
-function PotentialChapter({ id, hidden = false, buttonAnchor }: { id: string; hidden?: boolean; buttonAnchor?: RefObject<HTMLSpanElement | null> }) {
+// Potential is rendered twice: once in place and once above Signal as the seam for scrolling upward.
+function PotentialChapter({ id, hidden = false }: { id: string; hidden?: boolean }) {
   const [titleRevealed, setTitleRevealed] = useState(false)
   const revealTitle = useMemo(() => () => setTitleRevealed(true), [])
   return (
-      <section id={id} className="chapter potential" aria-label={hidden ? undefined : 'Chapter three: Potential'} aria-hidden={hidden || undefined} inert={hidden || undefined}>
+      <section id={id} className="chapter potential" aria-label={hidden ? undefined : 'Chapter four: Potential'} aria-hidden={hidden || undefined} inert={hidden || undefined}>
         <p>Potential</p>
-        <div className="potential-copy"><RainHeadline lines={['Create', 'Experiences', 'like this', 'in 5 days']} onReveal={revealTitle} /><span ref={buttonAnchor} className="cta-anchor"><a className={`cta ${titleRevealed ? 'cta-arriving' : 'cta-waiting'}`} href="https://claude-expert.pages.dev/"><span className="cta-sweep" aria-hidden="true" /><span className="cta-glyphs" aria-hidden="true">ᚫ ⊹ ᛟ ⌁</span><span className="cta-label">become claude.expert</span><span className="cta-arrow" aria-hidden="true">↗︎</span></a></span></div>
+        <div className="potential-copy"><RainHeadline lines={['Learn to Create', 'Web Experiences', 'like this']} onReveal={revealTitle} /><span className="cta-anchor"><a className={`cta ${titleRevealed ? 'cta-arriving' : 'cta-waiting'}`} href="https://claude-expert.pages.dev/"><span className="cta-sweep" aria-hidden="true" /><span className="cta-glyphs" aria-hidden="true">ᚫ ⊹ ᛟ ⌁</span><span className="cta-label">become claude.expert</span><span className="cta-arrow" aria-hidden="true">↗︎</span></a></span></div>
       </section>
   )
 }
