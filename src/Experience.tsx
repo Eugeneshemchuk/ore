@@ -1516,13 +1516,14 @@ function CameraDirector({ reducedMotion, oreGroup, motion }: { reducedMotion: bo
   const mindCrossPosition = useMemo(() => new THREE.Vector3(0.16, 1.54, -4.82), [])
   const mindExitPosition = useMemo(() => new THREE.Vector3(-0.16, 1.32, -7.55), [])
   // Open space ahead of the brain: the asteroid is a small far shape here.
-  // One continuous flight: open space, the asteroid's left flank, then on
-  // past it. Arc-length sampling keeps the speed even across the legs.
+  // One continuous flight: open space, a close look at the crystals, the
+  // asteroid's left flank, then on past it. Arc-length sampling keeps the
+  // speed even across the legs.
   const asteroidPass = useMemo(() => {
     const points = [
       mindExitPosition.clone(),
       new THREE.Vector3(-0.06, 1.3, ORE_Z + 14),
-      new THREE.Vector3(-1.2, 1.38, ORE_Z + 5),
+      new THREE.Vector3(-1.3, 1.26, ORE_Z + 4.1),
       new THREE.Vector3(-2.6, 1.5, ORE_Z),
       new THREE.Vector3(-2.2, 1.42, ORE_Z - 10),
     ]
@@ -1536,10 +1537,13 @@ function CameraDirector({ reducedMotion, oreGroup, motion }: { reducedMotion: bo
       }
       return best
     }
+    const closeAt = along(points[2])
     const passAt = along(points[3])
-    // Scroll keys: open space until the asteroid surfaces, the approach, then on past it.
-    const keys: [number, number][] = [[3.02, 0], [ORE_JOURNEY_END, along(points[1])], [3.72, passAt], [3.82, 1]]
-    return { curve, passAt, keys }
+    // Linger beside the crystals for a short drift before swinging out past them.
+    const lingerAt = closeAt + (passAt - closeAt) * 0.15
+    // Scroll keys: open space until the asteroid surfaces, the approach, the close look, then on past it.
+    const keys: [number, number][] = [[3.02, 0], [ORE_JOURNEY_END, along(points[1])], [3.6, closeAt], [3.67, lingerAt], [3.74, passAt], [3.82, 1]]
+    return { curve, closeAt, lingerAt, passAt, keys }
   }, [mindExitPosition])
   const passAhead = useMemo(() => new THREE.Vector3(), [])
   // Reduced motion skips the flight and holds the inspectable view.
@@ -1593,9 +1597,10 @@ function CameraDirector({ reducedMotion, oreGroup, motion }: { reducedMotion: bo
       let closeUp = 0
       if (phase >= 3 && phase < 3.82 && oreGroup.current) {
         // Fly on through open space, keep the asteroid framed while it grows,
-        // then turn the gaze forward so it slides out of frame as we pass it.
+        // centre it for the close look, then turn the gaze forward so it
+        // slides out of frame as we pass it.
         oreGroup.current.getWorldPosition(oreCenter)
-        const { curve, passAt, keys } = asteroidPass
+        const { curve, closeAt, lingerAt, passAt, keys } = asteroidPass
         const leg = Math.max(0, keys.findIndex(([at]) => phase < at) - 1)
         const [fromPhase, fromTravel] = keys[leg]
         const [toPhase, toTravel] = keys[Math.min(leg + 1, keys.length - 1)]
@@ -1604,8 +1609,8 @@ function CameraDirector({ reducedMotion, oreGroup, motion }: { reducedMotion: bo
         curve.getPointAt(travel, targetPosition.current)
         curve.getPointAt(Math.min(1, travel + 0.08), passAhead)
         passAhead.z -= 6
-        targetLook.current.copy(oreLook).lerp(oreCenter, 0.72)
-          .lerp(passAhead, THREE.MathUtils.smoothstep(travel, passAt - 0.12, passAt))
+        targetLook.current.copy(oreLook).lerp(oreCenter, THREE.MathUtils.lerp(0.72, 1, THREE.MathUtils.smoothstep(travel, closeAt - 0.12, closeAt)))
+          .lerp(passAhead, THREE.MathUtils.smoothstep(travel, lingerAt, passAt))
         closeUp = THREE.MathUtils.smoothstep(phase, ORE_JOURNEY_END, ORE_APPROACH_END)
       }
       const pointer = motion.current.pointer

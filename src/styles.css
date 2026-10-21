@@ -111,7 +111,8 @@ h1 em { color: #f06e4e; font-style: normal; }
   .chapter { min-height: 155svh; }
   .void { min-height: 250svh; }
   .mind { min-height: 775svh; }
-  .potential { min-height: 250svh; }
+  /* Touch flings cover distance fast; give the flight, approach and close-up room to read. */
+  .potential { min-height: 520svh; }
   .hero-copy, .potential-copy { width: 100%; text-align: center; }
   .title-stage { justify-content: center; align-items: center; padding: 0 16px; perspective-origin: 50% 50%; }
   .title-panel { transform-origin: 50% 50%; }
