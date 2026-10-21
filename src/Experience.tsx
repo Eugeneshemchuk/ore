@@ -454,6 +454,8 @@ function DigitalRain({ reducedMotion }: { reducedMotion: boolean }) {
 }
 
 const NEURON_ANCHOR = new THREE.Vector3(0, 0, 0.9)
+// Radius of each iris disc in the mask's eye sockets.
+const IRIS_RADIUS = 0.14
 
 type RepulsionUniforms = {
   uRepelPointer: { value: THREE.Vector2 }
@@ -880,8 +882,8 @@ function VoidField({ motion, reducedMotion }: { motion: RefObject<SwarmMotion>; 
         const radius = Math.sqrt(random())
         // One shallow plane per eye makes a true iris disc rather than a
         // little blue sphere embedded in the mask.
-        const x = side * (0.84 + Math.cos(angle) * 0.185 * radius)
-        const y = 0.62 + Math.sin(angle) * 0.185 * radius
+        const x = side * (0.84 + Math.cos(angle) * IRIS_RADIUS * radius)
+        const y = 0.62 + Math.sin(angle) * IRIS_RADIUS * radius
         return [x, y, -3.505 + (random() - 0.5) * 0.012, 4] as const
       }
       if (featureRoll < 0.12) {
@@ -1008,7 +1010,7 @@ function VoidField({ motion, reducedMotion }: { motion: RefObject<SwarmMotion>; 
       const [x, y, z, feature] = pickFaceTarget(i)
       faceTargets.set([x, y, z], i * 3)
       faceFeatures[i] = feature
-      if (feature === 4) eyeRadii[i] = Math.min(1, Math.hypot((Math.abs(x) - 0.84) / 0.185, (y - 0.62) / 0.185))
+      if (feature === 4) eyeRadii[i] = Math.min(1, Math.hypot((Math.abs(x) - 0.84) / IRIS_RADIUS, (y - 0.62) / IRIS_RADIUS))
     }
     const result = new THREE.BufferGeometry()
     result.setAttribute('position', new THREE.BufferAttribute(positions, 3))
