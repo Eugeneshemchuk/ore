@@ -785,7 +785,7 @@ function CosmicParticles({ repulsion }: { repulsion: RepulsionUniforms }) {
       const radius = 0.7 + Math.pow(Math.random(), 0.7) * 6.5
       positions[i * 3] = Math.cos(angle) * radius
       positions[i * 3 + 1] = 1.3 + Math.sin(angle) * radius * 0.7
-      positions[i * 3 + 2] = -6 + Math.random() * (ORE_Z + 2)
+      positions[i * 3 + 2] = -6 + Math.random() * (ORE_Z - 14)
     }
     const result = new THREE.BufferGeometry()
     result.setAttribute('position', new THREE.BufferAttribute(positions, 3))
@@ -1265,7 +1265,7 @@ function ParticleSwarm({ motion, reducedMotion }: { motion: RefObject<SwarmMotio
   const target = useRef(new THREE.Vector2())
   const input = useRef({ active: false, pointerEnergy: 0, scrollEnergy: 0, scrollY: window.scrollY })
   const geometry = useMemo(() => {
-    const count = mobile ? 900 : 4000
+    const count = mobile ? 320 : 1400
     const positions = new Float32Array(count * 3)
     const seeds = new Float32Array(count)
     for (let i = 0; i < count; i += 1) {
@@ -1336,8 +1336,8 @@ function ParticleSwarm({ motion, reducedMotion }: { motion: RefObject<SwarmMotio
     // Potential uses a compact cursor sphere so the interaction stays on the
     // specimen rather than opening across most of the frame.
     live.uRepelRadius.value = phase > 2.7 && oreBeat(phase) < 3.58 ? 0.45 : 1
-    const beat = oreBeat(phase)
-    live.uOpacity.value = THREE.MathUtils.smoothstep(beat, 3.12, 3.36) * (1 - THREE.MathUtils.smoothstep(phase, 3.79, 3.87))
+    // Arrives with the asteroid, on the same fade.
+    live.uOpacity.value = THREE.MathUtils.smoothstep(phase, 3.14, 3.34) * (1 - THREE.MathUtils.smoothstep(phase, 3.79, 3.87))
   })
   // Only Potential shows this field, so it surrounds the asteroid.
   return <points geometry={geometry} frustumCulled={false} position={[0, 1.1, ORE_Z + 2]}>
@@ -1468,8 +1468,32 @@ function CameraDirector({ reducedMotion, oreGroup, motion }: { reducedMotion: bo
   const mindCrossPosition = useMemo(() => new THREE.Vector3(0.16, 1.54, -4.82), [])
   const mindExitPosition = useMemo(() => new THREE.Vector3(-0.16, 1.32, -7.55), [])
   // Open space ahead of the brain: the asteroid is a small far shape here.
-  const asteroidDistantPosition = useMemo(() => new THREE.Vector3(-0.06, 1.3, ORE_Z + 18), [])
-  const asteroidNearPosition = useMemo(() => new THREE.Vector3(0.48, 1.06, ORE_Z + 1.84), [])
+  // One continuous flight: open space, the asteroid's left flank, then on
+  // past it. Arc-length sampling keeps the speed even across the legs.
+  const asteroidPass = useMemo(() => {
+    const points = [
+      mindExitPosition.clone(),
+      new THREE.Vector3(-0.06, 1.3, ORE_Z + 14),
+      new THREE.Vector3(-1.2, 1.38, ORE_Z + 5),
+      new THREE.Vector3(-2.6, 1.5, ORE_Z),
+      new THREE.Vector3(-2.2, 1.42, ORE_Z - 10),
+    ]
+    const curve = new THREE.CatmullRomCurve3(points, false, 'centripetal')
+    // Arc-length positions of the distant view and of drawing level with the asteroid.
+    const along = (point: THREE.Vector3) => {
+      let best = 0
+      for (let i = 0, nearest = Infinity; i <= 400; i += 1) {
+        const distance = curve.getPointAt(i / 400).distanceToSquared(point)
+        if (distance < nearest) { nearest = distance; best = i / 400 }
+      }
+      return best
+    }
+    const passAt = along(points[3])
+    // Scroll keys: open space until the asteroid surfaces, the approach, then on past it.
+    const keys: [number, number][] = [[3.02, 0], [ORE_JOURNEY_END, along(points[1])], [3.72, passAt], [3.82, 1]]
+    return { curve, passAt, keys }
+  }, [mindExitPosition])
+  const passAhead = useMemo(() => new THREE.Vector3(), [])
   // Reduced motion skips the flight and holds the inspectable view.
   const asteroidViewPosition = useMemo(() => new THREE.Vector3(-0.06, 1.32, ORE_Z + 6.9), [])
   const signalPosition = useMemo(() => new THREE.Vector3(0, 0, 6.3), [])
@@ -1520,14 +1544,21 @@ function CameraDirector({ reducedMotion, oreGroup, motion }: { reducedMotion: bo
       }
       let closeUp = 0
       if (phase >= 3 && phase < 3.82 && oreGroup.current) {
-        // Fly on through open space until the asteroid surfaces far ahead,
-        // then close in on its real rotating world position until it fills frame.
+        // Fly on through open space, keep the asteroid framed while it grows,
+        // then turn the gaze forward so it slides out of frame as we pass it.
         oreGroup.current.getWorldPosition(oreCenter)
-        const journey = THREE.MathUtils.smoothstep(phase, 3.02, ORE_JOURNEY_END)
-        const oreCloseUp = THREE.MathUtils.smoothstep(phase, ORE_JOURNEY_END, ORE_APPROACH_END)
-        targetPosition.current.copy(mindExitPosition).lerp(asteroidDistantPosition, journey).lerp(asteroidNearPosition, oreCloseUp)
+        const { curve, passAt, keys } = asteroidPass
+        const leg = Math.max(0, keys.findIndex(([at]) => phase < at) - 1)
+        const [fromPhase, fromTravel] = keys[leg]
+        const [toPhase, toTravel] = keys[Math.min(leg + 1, keys.length - 1)]
+        const travel = phase >= keys[keys.length - 1][0] ? 1
+          : THREE.MathUtils.lerp(fromTravel, toTravel, THREE.MathUtils.clamp((phase - fromPhase) / (toPhase - fromPhase), 0, 1))
+        curve.getPointAt(travel, targetPosition.current)
+        curve.getPointAt(Math.min(1, travel + 0.08), passAhead)
+        passAhead.z -= 6
         targetLook.current.copy(oreLook).lerp(oreCenter, 0.72)
-        closeUp = oreCloseUp
+          .lerp(passAhead, THREE.MathUtils.smoothstep(travel, passAt - 0.12, passAt))
+        closeUp = THREE.MathUtils.smoothstep(phase, ORE_JOURNEY_END, ORE_APPROACH_END)
       }
       const pointer = motion.current.pointer
       const parallax = motion.current.active ? 1 : 0
