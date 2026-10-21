@@ -462,6 +462,35 @@ const maskPose = new THREE.Vector2()
 // The mask turns about this point; the brain sits behind its forehead.
 const MASK_PIVOT = new THREE.Vector3(0, 0, -4.24)
 const BRAIN_OFFSET = new THREE.Vector3(0, 1.7, -1.22)
+// The brain group's world transform, written by NeuralNetwork each frame so
+// the dissolving mask can pour its particles into the network.
+const brainMatrix = new THREE.Matrix4()
+// A cerebrum behind the mask's forehead: two hemispheres side by side, split
+// by a vertical fissure and long from front to back. `depthOverride` lets the
+// mask's particles pick their own spot inside the same volume.
+const BRAIN_NODES = 420
+function brainNode(index: number, depthOverride?: number) {
+  const side = index % 2 === 0 ? -1 : 1
+  const k = Math.floor(index / 2)
+  const theta = k * 2.3999632297 + (side > 0 ? 1.1 : 0)
+  const y = 1 - 2 * (k + 0.5) / 210
+  const ring = Math.sqrt(1 - y * y)
+  const outward = Math.abs(Math.cos(theta)) * ring
+  const z = Math.sin(theta) * ring
+  const noise = Math.sin((index + 1) * 12.9898) * 43758.5453
+  const depth = depthOverride ?? noise - Math.floor(noise)
+  // About two thirds of the nodes form the cortex; the rest fill the
+  // interior evenly by volume so the brain never reads as hollow.
+  const shell = depth < 0.64 ? 0.78 + depth / 0.64 * 0.22 : 0.12 + Math.cbrt((depth - 0.64) / 0.36) * 0.66
+  // Shallow gyri ripple the cortex; the temporal lobe bulges low and forward.
+  const r = shell * (1 + Math.sin(theta * 5 + y * 9) * 0.05)
+  const temporal = Math.max(0, -y) * Math.max(0, z + 0.2) * 0.35
+  return new THREE.Vector3(
+    side * (0.05 + (outward * 0.9 + temporal) * r),
+    y * r * (y > 0 ? 0.8 : 0.5),
+    z * r * 1.1,
+  )
+}
 
 type RepulsionUniforms = {
   uRepelPointer: { value: THREE.Vector2 }
@@ -570,33 +599,9 @@ function NeuralNetwork({ group, repulsion, reducedMotion }: { group: RefObject<T
   useEffect(() => () => nodeTexture.dispose(), [nodeTexture])
   const { nodes, links, original, folded, edges } = useMemo(() => {
     const positions: THREE.Vector3[] = [NEURON_ANCHOR.clone()]
-    const seed = (index: number) => {
-      // A cerebrum behind the mask's forehead: two hemispheres side by side,
-      // split by a vertical fissure and long from front to back.
-      const side = index % 2 === 0 ? -1 : 1
-      const k = Math.floor(index / 2)
-      const theta = k * 2.3999632297 + (side > 0 ? 1.1 : 0)
-      const y = 1 - 2 * (k + 0.5) / 210
-      const ring = Math.sqrt(1 - y * y)
-      const outward = Math.abs(Math.cos(theta)) * ring
-      const z = Math.sin(theta) * ring
-      const noise = Math.sin((index + 1) * 12.9898) * 43758.5453
-      const depth = noise - Math.floor(noise)
-      // About two thirds of the nodes form the cortex; the rest fill the
-      // interior evenly by volume so the brain never reads as hollow.
-      const shell = depth < 0.64 ? 0.78 + depth / 0.64 * 0.22 : 0.12 + Math.cbrt((depth - 0.64) / 0.36) * 0.66
-      // Shallow gyri ripple the cortex; the temporal lobe bulges low and forward.
-      const r = shell * (1 + Math.sin(theta * 5 + y * 9) * 0.05)
-      const temporal = Math.max(0, -y) * Math.max(0, z + 0.2) * 0.35
-      return new THREE.Vector3(
-        side * (0.05 + (outward * 0.9 + temporal) * r),
-        y * r * (y > 0 ? 0.8 : 0.5),
-        z * r * 1.1,
-      )
-    }
     // Keep both hemispheres so the field can sit in the mask's crown as a
     // recognisable neural brain, rather than reading as a graph beside it.
-    for (let i = 0; i < 420; i += 1) positions.push(seed(i))
+    for (let i = 0; i < BRAIN_NODES; i += 1) positions.push(brainNode(i))
     const originalCount = positions.length
     positions.push(...addedNodes)
     const linkData: number[] = []
@@ -714,6 +719,7 @@ function NeuralNetwork({ group, repulsion, reducedMotion }: { group: RefObject<T
       group.current.quaternion.setFromEuler(poseEuler.set(userRotation.current.x, userRotation.current.y, 0)).premultiply(maskQuaternion)
       group.current.position.copy(BRAIN_OFFSET).applyQuaternion(maskQuaternion).add(MASK_PIVOT)
       group.current.scale.setScalar(1.02 + arrival * 0.1)
+      brainMatrix.compose(group.current.position, group.current.quaternion, group.current.scale)
     }
     const nodePositions = nodes.getAttribute('position') as THREE.BufferAttribute
     const linkPositions = links.getAttribute('position') as THREE.BufferAttribute
@@ -867,6 +873,7 @@ function VoidField({ motion, reducedMotion }: { motion: RefObject<SwarmMotion>; 
     const faceTargets = new Float32Array(count * 3)
     const faceFeatures = new Float32Array(count)
     const eyeRadii = new Float32Array(count)
+    const brainTargets = new Float32Array(count * 3)
 
     const pickFaceTarget = (index: number) => {
       let randomState = 0
@@ -1019,6 +1026,8 @@ function VoidField({ motion, reducedMotion }: { motion: RefObject<SwarmMotion>; 
       const [x, y, z, feature] = pickFaceTarget(i)
       faceTargets.set([x, y, z], i * 3)
       faceFeatures[i] = feature
+      const node = brainNode(Math.floor(Math.random() * BRAIN_NODES), Math.random())
+      brainTargets.set([node.x + (Math.random() - 0.5) * 0.08, node.y + (Math.random() - 0.5) * 0.08, node.z + (Math.random() - 0.5) * 0.08], i * 3)
       if (feature === 4) eyeRadii[i] = Math.min(1, Math.hypot((Math.abs(x) - 0.84) / IRIS_RADIUS, (y - 0.62) / IRIS_RADIUS))
     }
     const result = new THREE.BufferGeometry()
@@ -1027,6 +1036,7 @@ function VoidField({ motion, reducedMotion }: { motion: RefObject<SwarmMotion>; 
     result.setAttribute('aFaceTarget', new THREE.BufferAttribute(faceTargets, 3))
     result.setAttribute('aFaceFeature', new THREE.BufferAttribute(faceFeatures, 1))
     result.setAttribute('aEyeRadius', new THREE.BufferAttribute(eyeRadii, 1))
+    result.setAttribute('aBrainTarget', new THREE.BufferAttribute(brainTargets, 3))
     return result
   }, [reducedMotion, tier])
   const uniforms = useMemo(() => ({
@@ -1035,6 +1045,7 @@ function VoidField({ motion, reducedMotion }: { motion: RefObject<SwarmMotion>; 
     uEchoOrigin: { value: new THREE.Vector2() }, uEchoAge: { value: 9 },
     uSwirl: { value: 0 }, uEnergy: { value: 0 }, uTravel: { value: 0 }, uFace: { value: 0 },
     uFaceRotation: { value: new THREE.Vector2() }, uFaceDisturb: { value: 0 },
+    uBrain: { value: 0 }, uBrainMatrix: { value: new THREE.Matrix4() },
   }), [])
   useEffect(() => () => geometry.dispose(), [geometry])
   useEffect(() => {
@@ -1083,7 +1094,7 @@ function VoidField({ motion, reducedMotion }: { motion: RefObject<SwarmMotion>; 
     const entering = THREE.MathUtils.smoothstep(phase, 0.42, 0.9)
     // Preserve the mask while the camera passes through it, then let the
     // particles disperse into the following scene.
-    const leaving = 1 - THREE.MathUtils.smoothstep(phase, 2.26, 2.56)
+    const leaving = 1 - THREE.MathUtils.smoothstep(phase, 2.4, 2.66)
     live.uTime.value = reducedMotion ? 0 : clock.getElapsedTime()
     live.uOpacity.value = entering * leaving
     live.uDpr.value = gl.getPixelRatio()
@@ -1092,7 +1103,9 @@ function VoidField({ motion, reducedMotion }: { motion: RefObject<SwarmMotion>; 
     live.uEnergy.value = reducedMotion ? 0 : motion.current.energy
     live.uTravel.value = reducedMotion ? 0 : THREE.MathUtils.smoothstep(phase, 0.72, 1.5)
     live.uFace.value = THREE.MathUtils.smoothstep(phase, 1.08, 1.68)
-      * (1 - THREE.MathUtils.smoothstep(phase, 2.08, 2.36))
+    // Rather than scattering, the mask pours itself into the brain behind it.
+    live.uBrain.value = reducedMotion ? 0 : THREE.MathUtils.smoothstep(phase, 1.98, 2.3)
+    live.uBrainMatrix.value.copy(brainMatrix)
     // The two irises bloom from their pupils toward the rim, like eyelids
     // lifting. They wait until the face has fully gathered, then open a beat
     // later; keeping this separate from the mask gather lets it feel alive.
@@ -1147,7 +1160,9 @@ function VoidField({ motion, reducedMotion }: { motion: RefObject<SwarmMotion>; 
       attribute vec3 aFaceTarget;
       attribute float aFaceFeature;
       attribute float aEyeRadius;
-      uniform float uTime, uDpr, uPointerActive, uSwirl, uEnergy, uTravel, uFace, uFaceDisturb, uEyeOpen, uFaceDrift, uEchoAge;
+      attribute vec3 aBrainTarget;
+      uniform float uTime, uDpr, uPointerActive, uSwirl, uEnergy, uTravel, uFace, uFaceDisturb, uEyeOpen, uFaceDrift, uEchoAge, uBrain;
+      uniform mat4 uBrainMatrix;
       uniform vec2 uPointer, uEchoOrigin;
       uniform vec2 uFaceRotation;
       varying float vMix;
@@ -1181,6 +1196,14 @@ function VoidField({ motion, reducedMotion }: { motion: RefObject<SwarmMotion>; 
         float vibration = sin(uTime * (1.2 + aSeed * 1.8) + aSeed * 51.0) * 0.016;
         faceTarget += vec3(cos(aSeed * 39.0), sin(aSeed * 71.0), sin(aSeed * 23.0)) * vibration;
         p = mix(p, faceTarget, gather);
+        // Each particle leaves the face on its own beat and arcs into a spot
+        // among the brain's nodes, bowing outward so the stream reads as flow.
+        float absorb = smoothstep(0.0, 1.0, uBrain * 1.3 - aSeed * 0.3);
+        vec3 brainTarget = (uBrainMatrix * vec4(aBrainTarget, 1.0)).xyz;
+        brainTarget += vec3(sin(uTime * 0.7 + aSeed * 43.0), cos(uTime * 0.6 + aSeed * 29.0), sin(uTime * 0.5 + aSeed * 17.0)) * 0.025;
+        vec3 flight = mix(p, brainTarget, absorb);
+        flight += vec3(sin(aSeed * 83.0), cos(aSeed * 59.0), sin(aSeed * 31.0)) * sin(absorb * 3.14159) * 0.35;
+        p = mix(p, flight, step(0.001, uBrain));
         vec4 view = modelViewMatrix * vec4(p, 1.0);
         vec4 clip = projectionMatrix * view;
         vec2 faceScreen = clip.xy / max(clip.w, 0.001);
