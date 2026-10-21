@@ -75,7 +75,7 @@ h1 em { color: #f06e4e; font-style: normal; }
 .scroll-prompt { color: #87929a; }
 .mind { min-height: 675svh; justify-content: space-between; align-items: flex-start; }.mind > div { margin: auto 0; }.mind p, .future p { color: #f06e4e; font-size: 13px; }.mind h2 { font-size: clamp(23px, 3.5vw, 56px); max-width: 850px; }.mind h2 em { font-style: normal; color: #f06e4e; }.mind-caption { display: block; margin-top: 32px; font: 500 13px/1 Manrope, sans-serif; color: #87929a; }
 .void { min-height: 270svh; pointer-events: none; }.void > p { color: #7cb9a3; font: 500 13px/1 Manrope, sans-serif; opacity: .72; }.void-copy { margin: auto 0; color: rgba(183, 223, 203, .7); font: 500 12px/1 Manrope, sans-serif; letter-spacing: .16em; text-transform: uppercase; opacity: .72; }
-.potential { display: block; min-height: 270svh; }.potential > p { color: #c89b56; font: 500 13px/1 Manrope, sans-serif; }.potential h2 { font-size: clamp(26px, 3.75vw, 60px); }.potential h2 em { font-style: normal; color: #f06e4e; }.ore-note { color: #aeb8bd; margin: 28px 0; font-size: 16px; }
+.potential { display: block; min-height: 450svh; }.potential > p { color: #c89b56; font: 500 13px/1 Manrope, sans-serif; }.potential h2 { font-size: clamp(26px, 3.75vw, 60px); }.potential h2 em { font-style: normal; color: #f06e4e; }.ore-note { color: #aeb8bd; margin: 28px 0; font-size: 16px; }
 .cta { position: relative; isolation: isolate; display: inline-flex; align-items: center; gap: 26px; padding: 19px 20px 19px 22px; color: #ffd5b2; background: linear-gradient(115deg, rgba(35, 17, 10, .96), rgba(12, 10, 9, .94)); border: 1px solid #a44720; clip-path: polygon(0 9px, 9px 0, 100% 0, 100% calc(100% - 9px), calc(100% - 9px) 100%, 0 100%); font: 600 14px/1 Manrope, sans-serif; letter-spacing: .015em; transition: border-color .35s, color .35s, background-color .35s; }
 .potential .cta { margin-top: 28px; }
 .cta-anchor { position: fixed; z-index: 4; right: clamp(20px, 3vw, 42px); bottom: clamp(22px, 3vw, 42px); display: inline-block; filter: drop-shadow(0 12px 14px rgba(0, 0, 0, .5)) drop-shadow(0 0 12px rgba(255, 106, 34, .17)); }
@@ -113,7 +113,7 @@ h1 em { color: #f06e4e; font-style: normal; }
   .void { min-height: 250svh; }
   .mind { min-height: 775svh; }
   /* Touch flings cover distance fast; give the flight, approach and close-up room to read. */
-  .potential { min-height: 520svh; }
+  .potential { min-height: 860svh; }
   .hero-copy, .potential-copy { width: 100%; text-align: center; }
   .title-stage { justify-content: center; align-items: center; padding: 0 16px; perspective-origin: 50% 50%; }
   .title-panel { transform-origin: 50% 50%; }

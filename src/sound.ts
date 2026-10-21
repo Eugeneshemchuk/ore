@@ -3,6 +3,10 @@
 export class Soundscape {
   private readonly context = new AudioContext()
   private readonly master = this.context.createGain()
+  // Everything but the slow-motion hit runs through this low-pass, which
+  // closes during the crystal close-up so the scene sounds slowed down.
+  private readonly muffle = this.context.createBiquadFilter()
+  private readonly impact = this.context.createGain()
   private readonly drone = this.context.createGain()
   private readonly texture = this.context.createGain()
   private readonly networkMotion = this.context.createGain()
@@ -18,13 +22,19 @@ export class Soundscape {
   private readonly noise: AudioBufferSourceNode
   private step = 0
   private lastRipple = -Infinity
+  private lastSlowMotion = -Infinity
 
   constructor() {
     const compressor = this.context.createDynamicsCompressor()
     compressor.threshold.value = -20
     compressor.ratio.value = 4
     this.master.gain.value = 0.0001
-    this.master.connect(compressor).connect(this.context.destination)
+    this.muffle.type = 'lowpass'
+    this.muffle.frequency.value = 20000
+    this.muffle.Q.value = 0.9
+    this.master.connect(this.muffle).connect(compressor).connect(this.context.destination)
+    this.impact.gain.value = 0.0001
+    this.impact.connect(compressor)
     this.drone.gain.value = 0.035
     this.drone.connect(this.master)
 
@@ -77,6 +87,7 @@ export class Soundscape {
     await this.context.resume()
     if (this.context.state !== 'running') throw new Error('Audio could not be started')
     this.master.gain.setTargetAtTime(0.65, this.context.currentTime, 0.15)
+    this.impact.gain.setTargetAtTime(0.65, this.context.currentTime, 0.15)
     // An audible confirmation above the phone-speaker bass range.
     this.tone(523.25, 0.025, 1.1, 0.12)
     this.tone(783.99, 0.012, 1.0, 0.24)
@@ -130,6 +141,66 @@ export class Soundscape {
     source.connect(gain).connect(this.master)
     source.onended = () => { source.disconnect(); gain.disconnect() }
     source.start()
+  }
+
+  // How far into the slow-motion close-up the camera is, 0–1.
+  slowMotion(level: number) {
+    const amount = Math.max(0, Math.min(1, level))
+    this.muffle.frequency.setTargetAtTime(20000 * Math.pow(480 / 20000, amount), this.context.currentTime, amount ? 0.18 : 0.4)
+  }
+
+  // The moment time slows: a falling sub thud, a short inward rush of air,
+  // and a crystal shimmer whose partials sag in pitch as they ring out.
+  slowMotionHit() {
+    if (this.context.state !== 'running' || !this.noise.buffer) return
+    const now = this.context.currentTime
+    if (now - this.lastSlowMotion < 2.5) return
+    this.lastSlowMotion = now
+    const sub = this.context.createOscillator()
+    const subEnvelope = this.context.createGain()
+    sub.type = 'sine'
+    sub.frequency.setValueAtTime(74, now)
+    sub.frequency.exponentialRampToValueAtTime(27, now + 1.8)
+    subEnvelope.gain.setValueAtTime(0.0001, now)
+    subEnvelope.gain.exponentialRampToValueAtTime(0.16, now + 0.03)
+    subEnvelope.gain.exponentialRampToValueAtTime(0.0001, now + 2.4)
+    sub.connect(subEnvelope).connect(this.impact)
+    sub.start(now)
+    sub.stop(now + 2.45)
+    sub.onended = () => { sub.disconnect(); subEnvelope.disconnect() }
+
+    const rush = this.context.createBufferSource()
+    const rushFilter = this.context.createBiquadFilter()
+    const rushEnvelope = this.context.createGain()
+    rush.buffer = this.noise.buffer
+    rushFilter.type = 'lowpass'
+    rushFilter.Q.value = 1.2
+    rushFilter.frequency.setValueAtTime(4200, now)
+    rushFilter.frequency.exponentialRampToValueAtTime(160, now + 1.3)
+    rushEnvelope.gain.setValueAtTime(0.0001, now)
+    rushEnvelope.gain.exponentialRampToValueAtTime(0.02, now + 0.06)
+    rushEnvelope.gain.exponentialRampToValueAtTime(0.0001, now + 1.5)
+    rush.connect(rushFilter).connect(rushEnvelope).connect(this.impact)
+    rush.start(now)
+    rush.stop(now + 1.55)
+    rush.onended = () => { rush.disconnect(); rushFilter.disconnect(); rushEnvelope.disconnect() }
+
+    const root = 640
+    ;[1, 1.51, 2.17, 2.94].forEach((ratio, index) => {
+      const start = now + 0.12 + index * 0.09
+      const oscillator = this.context.createOscillator()
+      const envelope = this.context.createGain()
+      oscillator.type = 'sine'
+      oscillator.frequency.setValueAtTime(root * ratio, start)
+      oscillator.frequency.exponentialRampToValueAtTime(root * ratio * 0.93, start + 4)
+      envelope.gain.setValueAtTime(0.0001, start)
+      envelope.gain.exponentialRampToValueAtTime(0.009 / (index + 1), start + 0.5)
+      envelope.gain.exponentialRampToValueAtTime(0.0001, start + 4.2)
+      oscillator.connect(envelope).connect(this.impact)
+      oscillator.start(start)
+      oscillator.stop(start + 4.25)
+      oscillator.onended = () => { oscillator.disconnect(); envelope.disconnect() }
+    })
   }
 
   private async loadNeuralSample() {

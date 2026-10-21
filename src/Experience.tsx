@@ -22,7 +22,7 @@ function rawChapterPhase() {
   if (y < voidScene) return y / Math.max(1, voidScene)
   if (y < mind) return 1 + (y - voidScene) / Math.max(1, mind - voidScene)
   if (y < potential) return 2 + (y - mind) / Math.max(1, potential - mind)
-  return 3 + (y - potential) / Math.max(1, period - potential)
+  return 3 + potentialScroll((y - potential) / Math.max(1, period - potential))
 }
 
 // Potential: a flight through open space (3.02–3.40) where the asteroid
@@ -35,6 +35,27 @@ const ORE_APPROACH_END = 3.78
 function oreBeat(phase: number) {
   return 3.02 + (phase - ORE_JOURNEY_END) * (0.64 / (ORE_APPROACH_END - ORE_JOURNEY_END))
 }
+// The orbit: a slow arrival (3.40–3.50), one full turn around the asteroid
+// centred on its main crystal (3.50–3.74) with a slow-motion close-up at the
+// peak, then forward past it (3.74–3.82).
+const ORBIT_START = 3.5
+const ORBIT_PEAK = 3.62
+const ORBIT_END = 3.74
+// 1 while the close-up is held in slow motion.
+function slowMotion(phase: number) {
+  return THREE.MathUtils.smoothstep(phase, ORBIT_PEAK - 0.045, ORBIT_PEAK - 0.012)
+    * (1 - THREE.MathUtils.smoothstep(phase, ORBIT_PEAK + 0.012, ORBIT_PEAK + 0.045))
+}
+// The wider push-in toward the crystal around the slow-motion hold.
+function crystalCloseUp(phase: number) {
+  return THREE.MathUtils.smoothstep(phase, ORBIT_PEAK - 0.07, ORBIT_PEAK - 0.012)
+    * (1 - THREE.MathUtils.smoothstep(phase, ORBIT_PEAK + 0.012, ORBIT_PEAK + 0.07))
+}
+// The asteroid is fully gone before the camera turns back toward Signal, so
+// it never swings back into view on the way.
+const ORE_GONE = 3.81
+// Ambient time for the asteroid and its particles; it slows in the close-up.
+let oreTime = 0
 
 // Monotone cubic (Fritsch–Carlson) through [phase, value] keys: speed eases
 // between keys instead of jumping, and never overshoots or runs backwards.
@@ -67,6 +88,10 @@ function monotoneKeys(keys: [number, number][]) {
   }
 }
 
+// Potential's scroll is not spread evenly: the flight keeps its old length and
+// the orbit gets most of the added scroll, so it can be taken slowly.
+const potentialScroll = monotoneKeys([[0, 0], [0.24, 0.4], [0.33, 0.5], [0.77, 0.74], [1, 1]])
+
 // A single eased timeline keeps all WebGL layers in step, including at the loop seam.
 let visualPhase: number | null = null
 function chapterPhase() {
@@ -93,7 +118,9 @@ function ScrollMotion({ reducedMotion }: { reducedMotion: boolean }) {
     const current = visualPhase ?? target
     // Choose the shortest path across the 0/4 boundary instead of rotating through all chapters.
     const difference = ((target - current + 6) % 4) - 2
-    const next = reducedMotion ? target : current + difference * (1 - Math.exp(-dt * (mobile.matches ? 7 : 12)))
+    // Heavier easing in the slow-motion hold, so even a fast scroll glides.
+    const rate = THREE.MathUtils.lerp(mobile.matches ? 7 : 12, 2.2, slowMotion(current))
+    const next = reducedMotion ? target : current + difference * (1 - Math.exp(-dt * rate))
     visualPhase = (next + 4) % 4
 
     // A small velocity-driven softening suggests motion without blurring text or burdening mobile GPUs.
@@ -1170,8 +1197,10 @@ function VoidField({ motion, reducedMotion }: { motion: RefObject<SwarmMotion>; 
     const echo = neuralEcho.current
     if (faceActive) {
       if (!echo.tracking) {
+        // Start the cross already open so the first hover reads at once
+        // instead of waiting for the front to grow out of the contact point.
         echo.origin.copy(motion.current.pointer)
-        echo.age = 0
+        echo.age = 0.45
         echo.active = true
         echo.tracking = true
       } else {
@@ -1179,7 +1208,7 @@ function VoidField({ motion, reducedMotion }: { motion: RefObject<SwarmMotion>; 
         // a distance threshold, keeping the whole interaction continuously alive.
         echo.origin.lerp(motion.current.pointer, 1 - Math.exp(-dt * 7))
         echo.age += dt
-        if (echo.age > 4.8) echo.age = 0
+        if (echo.age > 4.8) echo.age = 0.45
       }
     } else {
       echo.tracking = false
@@ -1191,7 +1220,7 @@ function VoidField({ motion, reducedMotion }: { motion: RefObject<SwarmMotion>; 
     // Leave a little momentum in the field when the pointer stops: disturbed
     // particles keep slowly settling at the last interaction point.
     const driftTarget = echo.active ? 1 : 0
-    live.uFaceDrift.value = THREE.MathUtils.lerp(live.uFaceDrift.value, driftTarget, 1 - Math.exp(-dt * (echo.active ? 2.8 : 0.72)))
+    live.uFaceDrift.value = THREE.MathUtils.lerp(live.uFaceDrift.value, driftTarget, 1 - Math.exp(-dt * (echo.active ? 9 : 0.72)))
   })
   return <points geometry={geometry} frustumCulled={false}>
     <shaderMaterial ref={material} transparent depthWrite={false} blending={THREE.AdditiveBlending} uniforms={uniforms} vertexShader={/* glsl */ `
@@ -1402,7 +1431,7 @@ function ParticleSwarm({ motion, reducedMotion }: { motion: RefObject<SwarmMotio
     if (!material.current) return
     // R3F can hold its own uniform objects; update the live material directly.
     const live = material.current.uniforms
-    live.uTime.value = reducedMotion ? 0 : clock.getElapsedTime()
+    live.uTime.value = reducedMotion ? 0 : oreTime
     live.uSwirl.value = reducedMotion ? 0 : motion.current.swirl
     live.uEnergy.value = reducedMotion ? 0 : motion.current.energy
     live.uPointer.value.copy(motion.current.pointer)
@@ -1414,7 +1443,7 @@ function ParticleSwarm({ motion, reducedMotion }: { motion: RefObject<SwarmMotio
     // specimen rather than opening across most of the frame.
     live.uRepelRadius.value = phase > 2.7 && oreBeat(phase) < 3.58 ? 0.45 : 1
     // Arrives with the asteroid, on the same fade.
-    live.uOpacity.value = THREE.MathUtils.smoothstep(phase, 3.14, 3.34) * (1 - THREE.MathUtils.smoothstep(phase, 3.79, 3.87))
+    live.uOpacity.value = THREE.MathUtils.smoothstep(phase, 3.14, 3.34) * (1 - THREE.MathUtils.smoothstep(phase, 3.77, ORE_GONE))
   })
   // Only Potential shows this field, so it surrounds the asteroid.
   return <points geometry={geometry} frustumCulled={false} position={[0, 1.1, ORE_Z + 2]}>
@@ -1484,12 +1513,12 @@ function CrystalParticleAura({ reducedMotion }: { reducedMotion: boolean }) {
   }, [mobile])
   const uniforms = useMemo(() => ({ uTime: { value: 0 }, uOpacity: { value: 0 }, uDpr: { value: 1 } }), [])
   useEffect(() => () => geometry.dispose(), [geometry])
-  useFrame(({ clock }) => {
+  useFrame(() => {
     if (!material.current) return
     const phase = chapterPhase()
     const entering = THREE.MathUtils.smoothstep(oreBeat(phase), 3.14, 3.36)
-    const leaving = 1 - THREE.MathUtils.smoothstep(oreBeat(phase), 3.54, 3.94)
-    material.current.uniforms.uTime.value = reducedMotion ? 0 : clock.getElapsedTime()
+    const leaving = 1 - THREE.MathUtils.smoothstep(phase, 3.72, ORE_GONE)
+    material.current.uniforms.uTime.value = reducedMotion ? 0 : oreTime
     material.current.uniforms.uDpr.value = gl.getPixelRatio()
     material.current.uniforms.uOpacity.value = entering * leaving * (mobile ? 0.58 : 0.76)
   })
@@ -1530,8 +1559,8 @@ function CrystalParticleAura({ reducedMotion }: { reducedMotion: boolean }) {
 }
 
 
-function CameraDirector({ reducedMotion, oreGroup, motion }: { reducedMotion: boolean; oreGroup: RefObject<THREE.Group | null>; motion: RefObject<SwarmMotion> }) {
-  const { camera } = useThree()
+function CameraDirector({ reducedMotion, oreGroup, crystalTip, motion }: { reducedMotion: boolean; oreGroup: RefObject<THREE.Group | null>; crystalTip: RefObject<THREE.Object3D | null>; motion: RefObject<SwarmMotion> }) {
+  const { camera, size } = useThree()
   const currentLook = useRef(new THREE.Vector3())
   const targetPosition = useRef(new THREE.Vector3())
   const targetLook = useRef(new THREE.Vector3())
@@ -1547,35 +1576,51 @@ function CameraDirector({ reducedMotion, oreGroup, motion }: { reducedMotion: bo
   const mindCrossPosition = useMemo(() => new THREE.Vector3(0.16, 1.54, -4.82), [])
   const mindExitPosition = useMemo(() => new THREE.Vector3(-0.16, 1.32, -7.55), [])
   // Open space ahead of the brain: the asteroid is a small far shape here.
-  // One continuous flight: open space, a close look at the crystals, the
-  // asteroid's left flank, then on past it. Arc-length sampling keeps the
-  // speed even across the legs.
+  // Three legs share one depth axis: the flight in, slowing to a stop in
+  // front of the asteroid; a full turn around it, looking at the main
+  // crystal; then forward past its left flank. Arc-length sampling keeps the
+  // speed even along each curve.
   const asteroidPass = useMemo(() => {
-    const points = [
+    const mobile = size.width < 720
+    const center = new THREE.Vector3(mobile ? 0.32 : 0.48, 1.12, ORE_Z)
+    const radius = mobile ? 7.4 : 8.6
+    const height = 2.2
+    const turnEnd = -Math.PI * 2 - 0.45
+    const orbitPoint = (angle: number) => center.clone().add(new THREE.Vector3(Math.sin(angle) * radius, height, Math.cos(angle) * radius))
+    const approachPoints = [
       mindExitPosition.clone(),
       new THREE.Vector3(-0.06, 1.3, ORE_Z + 14),
-      new THREE.Vector3(-1.3, 1.26, ORE_Z + 4.1),
-      new THREE.Vector3(-2.6, 1.5, ORE_Z),
-      new THREE.Vector3(-2.2, 1.42, ORE_Z - 10),
+      orbitPoint(0),
     ]
-    const curve = new THREE.CatmullRomCurve3(points, false, 'centripetal')
-    // Arc-length positions of the distant view and of drawing level with the asteroid.
-    const along = (point: THREE.Vector3) => {
-      let best = 0
-      for (let i = 0, nearest = Infinity; i <= 400; i += 1) {
-        const distance = curve.getPointAt(i / 400).distanceToSquared(point)
-        if (distance < nearest) { nearest = distance; best = i / 400 }
-      }
-      return best
+    const approach = new THREE.CatmullRomCurve3(approachPoints, false, 'centripetal')
+    const departure = new THREE.CatmullRomCurve3([
+      orbitPoint(turnEnd),
+      new THREE.Vector3(-2.6, 1.5, ORE_Z - 1.5),
+      new THREE.Vector3(-2.2, 1.42, ORE_Z - 10),
+    ], false, 'centripetal')
+    // Arc-length position of the distant view.
+    let distantAt = 0
+    for (let i = 0, nearest = Infinity; i <= 400; i += 1) {
+      const distance = approach.getPointAt(i / 400).distanceToSquared(approachPoints[1])
+      if (distance < nearest) { nearest = distance; distantAt = i / 400 }
     }
-    const closeAt = along(points[2])
-    const passAt = along(points[3])
-    // Linger beside the crystals for a short drift before swinging out past them.
-    const lingerAt = closeAt + (passAt - closeAt) * 0.15
-    // Scroll keys: open space until the asteroid surfaces, the approach, the close look, then on past it.
-    const travelAt = monotoneKeys([[3.02, 0], [ORE_JOURNEY_END, along(points[1])], [3.6, closeAt], [3.67, lingerAt], [3.74, passAt], [3.82, 1]])
-    return { curve, closeAt, passAt, travelAt }
-  }, [mindExitPosition])
+    // Open space until the asteroid surfaces, then a slow, decelerating arrival.
+    const approachAt = monotoneKeys([[3.02, 0], [ORE_JOURNEY_END, distantAt], [3.46, 0.9], [ORBIT_START, 1]])
+    // The turn eases in, crosses the crystal at the peak in slow motion
+    // (a fifth of a turn over a long stretch of scroll), then sweeps round.
+    const turnAt = monotoneKeys([
+      [ORBIT_START, 0],
+      [ORBIT_START + 0.02, -0.12],
+      [ORBIT_PEAK - 0.035, -Math.PI * 0.9],
+      [ORBIT_PEAK, -Math.PI],
+      [ORBIT_PEAK + 0.035, -Math.PI * 1.1],
+      [ORBIT_END, turnEnd],
+    ])
+    // Orbit radius tightens toward the peak and widens again on the way out.
+    const radiusAt = monotoneKeys([[ORBIT_START, radius], [ORBIT_PEAK, radius * 0.75], [ORBIT_END, radius]])
+    const departAt = monotoneKeys([[ORBIT_END, 0], [3.76, 0.08], [3.82, 1]])
+    return { approach, departure, approachAt, turnAt, radiusAt, departAt, height }
+  }, [mindExitPosition, size.width])
   const passAhead = useMemo(() => new THREE.Vector3(), [])
   // Reduced motion skips the flight and holds the inspectable view.
   const asteroidViewPosition = useMemo(() => new THREE.Vector3(-0.06, 1.32, ORE_Z + 6.9), [])
@@ -1590,6 +1635,10 @@ function CameraDirector({ reducedMotion, oreGroup, motion }: { reducedMotion: bo
   const mindExitLook = useMemo(() => new THREE.Vector3(0.42, 1.12, ORE_Z), [])
   const oreLook = useMemo(() => new THREE.Vector3(0.42, 1.12, ORE_Z), [])
   const oreCenter = useMemo(() => new THREE.Vector3(), [])
+  const crystalCenter = useMemo(() => new THREE.Vector3(), [])
+  const orbitLook = useMemo(() => new THREE.Vector3(), [])
+  const closeOffset = useMemo(() => new THREE.Vector3(), [])
+  const closePosition = useMemo(() => new THREE.Vector3(), [])
   useFrame(({ clock }, delta) => {
     const phase = chapterPhase()
     const transitionVoid = THREE.MathUtils.smoothstep(phase, 0.32, 0.94)
@@ -1627,18 +1676,42 @@ function CameraDirector({ reducedMotion, oreGroup, motion }: { reducedMotion: bo
       }
       let closeUp = 0
       if (phase >= 3 && phase < 3.82 && oreGroup.current) {
-        // Fly on through open space, keep the asteroid framed while it grows,
-        // centre it for the close look, then turn the gaze forward so it
-        // slides out of frame as we pass it.
         oreGroup.current.getWorldPosition(oreCenter)
-        const { curve, closeAt, passAt, travelAt } = asteroidPass
-        const travel = THREE.MathUtils.clamp(travelAt(phase), 0, 1)
-        curve.getPointAt(travel, targetPosition.current)
-        curve.getPointAt(Math.min(1, travel + 0.08), passAhead)
-        passAhead.z -= 6
-        targetLook.current.copy(oreLook).lerp(oreCenter, THREE.MathUtils.lerp(0.72, 1, THREE.MathUtils.smoothstep(travel, closeAt - 0.12, closeAt)))
-          .lerp(passAhead, THREE.MathUtils.smoothstep(travel, closeAt, passAt))
-        closeUp = THREE.MathUtils.smoothstep(phase, ORE_JOURNEY_END, ORE_APPROACH_END)
+        const { approach, departure, approachAt, turnAt, radiusAt, departAt, height } = asteroidPass
+        // Aim between the rock and its main crystal so both stay in frame.
+        const crystal = crystalTip.current?.parent
+        if (crystal) crystal.getWorldPosition(crystalCenter)
+        else crystalCenter.copy(oreCenter)
+        orbitLook.copy(oreCenter).lerp(crystalCenter, 0.6)
+        if (phase < ORBIT_START) {
+          // Fly on through open space and slow down in front of the asteroid.
+          approach.getPointAt(THREE.MathUtils.clamp(approachAt(phase), 0, 1), targetPosition.current)
+          targetLook.current.copy(oreLook).lerp(orbitLook, THREE.MathUtils.smoothstep(phase, 3.3, ORBIT_START))
+        } else if (phase < ORBIT_END) {
+          const angle = turnAt(phase)
+          const radius = radiusAt(phase)
+          targetPosition.current.set(Math.sin(angle) * radius, height, Math.cos(angle) * radius).add(oreCenter)
+          targetLook.current.copy(orbitLook)
+          // At the peak, push in along the orbit's radius to a close shot of
+          // the crystal itself, slightly above it.
+          const close = crystalCloseUp(phase)
+          if (close > 0) {
+            closeOffset.set(Math.sin(angle), 0, Math.cos(angle)).multiplyScalar(size.width < 720 ? 3.6 : 3.9)
+            closePosition.copy(crystalCenter).add(closeOffset)
+            closePosition.y += 0.9
+            targetPosition.current.lerp(closePosition, close)
+            targetLook.current.lerp(crystalCenter, close)
+          }
+        } else {
+          // Then forward: past the asteroid's left flank, the gaze turning
+          // ahead so it slides out of frame.
+          const travel = THREE.MathUtils.clamp(departAt(phase), 0, 1)
+          departure.getPointAt(travel, targetPosition.current)
+          departure.getPointAt(Math.min(1, travel + 0.08), passAhead)
+          passAhead.z -= 6
+          targetLook.current.copy(orbitLook).lerp(passAhead, THREE.MathUtils.smoothstep(travel, 0, 0.5))
+        }
+        closeUp = THREE.MathUtils.smoothstep(phase, ORE_JOURNEY_END, ORBIT_START)
       }
       const pointer = motion.current.pointer
       const parallax = motion.current.active ? 1 : 0
@@ -1660,11 +1733,21 @@ function CameraDirector({ reducedMotion, oreGroup, motion }: { reducedMotion: bo
       targetLook.current.y += pointer.y * THREE.MathUtils.lerp(0.1, 0.08, oreParallax) * parallax * (1 - closeUp)
       targetPosition.current.z += Math.sin(clock.getElapsedTime() * 0.45) * 0.13 * (1 - closeUp)
     }
-    // Keep the camera's easing consistent at different frame rates.
-    const damping = reducedMotion ? 1 : 1 - Math.exp(-Math.min(delta, 0.1) * 6.3)
+    // Keep the camera's easing consistent at different frame rates. It
+    // drags more in the slow-motion hold.
+    const slow = reducedMotion ? 0 : slowMotion(phase)
+    const damping = reducedMotion ? 1 : 1 - Math.exp(-Math.min(delta, 0.1) * THREE.MathUtils.lerp(6.3, 2.4, slow))
     camera.position.lerp(targetPosition.current, damping)
     currentLook.current.lerp(targetLook.current, damping)
     camera.lookAt(currentLook.current)
+    // A longer lens for the close-up compresses the crystal against the rock.
+    if (camera instanceof THREE.PerspectiveCamera) {
+      const fov = 44 - (reducedMotion ? 0 : crystalCloseUp(phase)) * 12
+      if (Math.abs(camera.fov - fov) > 0.01) {
+        camera.fov = fov
+        camera.updateProjectionMatrix()
+      }
+    }
   })
   return null
 }
@@ -2039,12 +2122,14 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
     const p = Math.min(phase / 3, 1)
     const beat = oreBeat(phase)
     // Surfaces mid-flight, while still far ahead.
-    const visible = THREE.MathUtils.smoothstep(phase, 3.14, 3.34) * (1 - THREE.MathUtils.smoothstep(phase, 3.79, 3.87))
-    const t = clock.getElapsedTime()
+    const visible = THREE.MathUtils.smoothstep(phase, 3.14, 3.34) * (1 - THREE.MathUtils.smoothstep(phase, 3.77, ORE_GONE))
+    // Ambient motion slows to a near-stop during the slow-motion close-up.
+    oreTime += Math.min(delta, 0.1) * (1 - 0.88 * slowMotion(phase))
+    const t = oreTime
     if (glint.current) {
-      // Peak at the closest point of the crystal-tip camera move, fading in
-      // and out with scroll progress (including when scrolling backwards).
-      const sparkle = reducedMotion ? 0 : THREE.MathUtils.smoothstep(beat, 3.18, 3.28) * (1 - THREE.MathUtils.smoothstep(beat, 3.36, 3.48))
+      // Peak at the slow-motion close-up, fading in and out with scroll
+      // progress (including when scrolling backwards).
+      const sparkle = reducedMotion ? 0 : slowMotion(phase)
       const material = glint.current.material as THREE.SpriteMaterial
       material.opacity = sparkle * visible * 0.9
       glint.current.scale.setScalar(0.16 + sparkle * 0.14)
@@ -2057,7 +2142,9 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
         spinVelocity.current.multiplyScalar(0.94)
       }
       spin.current.x = THREE.MathUtils.clamp(spin.current.x, -1.2, 1.2)
-      const scrollTurn = reducedMotion ? 0 : THREE.MathUtils.smoothstep(beat, 3.04, 3.7)
+      // The rock finishes its turn as the camera arrives, so the orbit reads
+      // as the camera moving rather than the asteroid spinning.
+      const scrollTurn = reducedMotion ? 0 : THREE.MathUtils.smoothstep(phase, 3.3, ORBIT_START)
       group.current.rotation.y = t * 0.12 + p * Math.PI * 1.5 + scrollTurn * Math.PI * 1.35 + spin.current.y
       group.current.rotation.x = 0.12 + Math.sin(t * 0.3) * 0.06 + (p - 0.8) * 0.4 + scrollTurn * 0.25 + spin.current.x
       const revealDrift = reducedMotion ? 0 : THREE.MathUtils.smoothstep(beat, 3.06, 3.23) * (1 - THREE.MathUtils.smoothstep(beat, 3.34, 3.52))
@@ -2133,7 +2220,7 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
       material.opacity = visible
       material.visible = visible > 0.001
     })
-    crystalHalos.current.forEach((material) => { material.opacity = visible * 0.24 })
+    crystalHalos.current.forEach((material) => { material.opacity = visible * (0.24 + slowMotion(phase) * 0.22) })
     // Small fragments can fill the frame from the close-up camera. Introduce
     // them only as the specimen pulls back into its inspectable final view.
     rubbleMaterials.current.forEach((material) => {
@@ -2298,7 +2385,7 @@ function SignalCanvas({ reducedMotion, documentVisible }: { reducedMotion: boole
       <CosmicParticles repulsion={repulsion} />
       <OreCrystal group={oreGroup} crystalTip={crystalTip} reducedMotion={reducedMotion} />
       <NeuralNetwork group={neuralGroup} repulsion={repulsion} reducedMotion={reducedMotion} />
-      <CameraDirector reducedMotion={reducedMotion} oreGroup={oreGroup} motion={swarmMotion} />
+      <CameraDirector reducedMotion={reducedMotion} oreGroup={oreGroup} crystalTip={crystalTip} motion={swarmMotion} />
       <RenderOnScroll enabled={reducedMotion && documentVisible} />
     </Canvas>
   )
@@ -2411,14 +2498,19 @@ function SoundToggle() {
     const update = () => {
       const phase = chapterPhase()
       sound.current?.update(phase)
-      // The glass crackle marks the moment the camera draws level with the
-      // asteroid and passes it, in either scroll direction.
-      const asteroidPassed = (lastAudioPhase < 3.68 && phase >= 3.68 && phase < 3.82)
-        || (lastAudioPhase > 3.74 && phase <= 3.74 && phase > 3.5)
+      // The glass crackle marks the moment the camera leaves the orbit and
+      // moves on past the asteroid, in either scroll direction.
+      const asteroidPassed = (lastAudioPhase < 3.76 && phase >= 3.76 && phase < 3.84)
+        || (lastAudioPhase > 3.78 && phase <= 3.78 && phase > 3.66)
       if (asteroidPassed && !motionPreference.matches && !document.hidden && performance.now() - lastCrystalZoom > 2000) {
         sound.current?.crystalZoom()
         lastCrystalZoom = performance.now()
       }
+      // Entering the slow-motion close-up from either side.
+      const slowEntered = (lastAudioPhase < ORBIT_PEAK - 0.03 && phase >= ORBIT_PEAK - 0.03 && phase < ORBIT_PEAK + 0.03)
+        || (lastAudioPhase > ORBIT_PEAK + 0.03 && phase <= ORBIT_PEAK + 0.03 && phase > ORBIT_PEAK - 0.03)
+      if (slowEntered && !motionPreference.matches && !document.hidden) sound.current?.slowMotionHit()
+      sound.current?.slowMotion(motionPreference.matches || document.hidden ? 0 : crystalCloseUp(phase))
       const difference = Math.abs(((phase - lastAudioPhase + 6) % 4) - 2)
       const departure = signalDeparture(phase)
       const presence = THREE.MathUtils.smoothstep(departure, 0.12, 0.42) * (1 - THREE.MathUtils.smoothstep(departure, 0.8, 0.98))
@@ -2428,7 +2520,7 @@ function SoundToggle() {
       lastAudioPhase = phase
     }
     const music = window.setInterval(() => sound.current?.note(chapterPhase()), 1700)
-    const ambience = window.setInterval(update, 250)
+    const ambience = window.setInterval(update, 120)
     const crystal = () => sound.current?.cue('crystal')
     let lastPointer: { x: number; y: number; time: number } | null = null
     let lastNetworkMotion = 0
@@ -2631,7 +2723,7 @@ export function Experience() {
       </section>
 
       <section id="mind" className="chapter mind" aria-label="Chapter three: Mind">
-        <FloatingTitle className="title-mind" index="03 · Mind" enter={[2.32, 2.44]} exit={[2.68, 2.84]}>{(present) => <RainHeadline lines={['Connect', 'the dots']} active={present} />}</FloatingTitle>
+        <FloatingTitle className="title-mind" index="03 · Mind" enter={[2.16, 2.28]} exit={[2.42, 2.54]}>{(present) => <RainHeadline lines={['Connect', 'the dots']} active={present} />}</FloatingTitle>
       </section>
       <PotentialChapter id="potential" />
       <SignalChapter id="loop" hidden />
