@@ -2481,7 +2481,7 @@ export function Experience() {
 
       <section id="mind" className="chapter mind" aria-label="Chapter three: Mind">
         <p>Mind</p>
-        <div><RainHeadline lines={['Connect', 'the dots']} /></div>
+        <FloatingTitle className="title-mind" index="03 · Mind" enter={[2.24, 2.36]} exit={[2.66, 2.84]}>{(present) => <RainHeadline lines={['Connect', 'the dots']} active={present} />}</FloatingTitle>
       </section>
       <PotentialChapter id="potential" />
       <SignalChapter id="loop" hidden />
@@ -2489,12 +2489,19 @@ export function Experience() {
   )
 }
 
-function RainHeadline({ lines, hero = false, onReveal }: { lines: string[]; hero?: boolean; onReveal?: () => void }) {
+function RainHeadline({ lines, hero = false, onReveal, active }: { lines: string[]; hero?: boolean; onReveal?: () => void; active?: boolean }) {
   const heading = useRef<HTMLHeadingElement>(null)
   const [revealed, setRevealed] = useState(false)
+  const controlled = active !== undefined
+  // A floating title replays its reveal on every arrival instead of once.
+  useEffect(() => {
+    if (!controlled) return
+    setRevealed(active)
+    if (active) onReveal?.()
+  }, [active, controlled, onReveal])
   useEffect(() => {
     const element = heading.current
-    if (!element) return
+    if (!element || controlled) return
     const reveal = () => { setRevealed(true); onReveal?.() }
     if (!('IntersectionObserver' in window)) { reveal(); return }
     const observer = new IntersectionObserver((entries) => {
@@ -2502,7 +2509,7 @@ function RainHeadline({ lines, hero = false, onReveal }: { lines: string[]; hero
     }, { threshold: 0.2 })
     observer.observe(element)
     return () => observer.disconnect()
-  }, [onReveal])
+  }, [controlled, onReveal])
   const rainLetters = (text: string, offset: number) => [...text].map((letter, index) => {
     if (letter === ' ') return <span key={index} className="rain-space">&nbsp;</span>
     const sequence = offset + index
@@ -2516,15 +2523,79 @@ function RainHeadline({ lines, hero = false, onReveal }: { lines: string[]; hero
   return hero ? <h1 ref={heading} className={className} aria-label={label}>{content}</h1> : <h2 ref={heading} className={className} aria-label={label}>{content}</h2>
 }
 
+// Titles float in the scene as fixed 3D panels instead of scrolling with the
+// page. Each drifts in from deep space while its chapter plays, tilts with the
+// pointer, and flies past the viewer as the camera moves on. The windows are
+// in chapter phase and may wrap across the loop seam.
+function FloatingTitle({ enter, exit, index, className, children }: { enter: [number, number]; exit: [number, number]; index: string; className: string; children: (present: boolean) => ReactNode }) {
+  const stage = useRef<HTMLDivElement>(null)
+  const panel = useRef<HTMLDivElement>(null)
+  const [present, setPresent] = useState(false)
+  const [enterStart, enterEnd] = enter
+  const [exitStart, exitEnd] = exit
+  useEffect(() => {
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)')
+    const pointer = { x: 0, y: 0 }
+    const tilt = { x: 0, y: 0 }
+    const seed = enterStart * 2.3
+    let shown = false
+    let last = performance.now()
+    let frame = 0
+    const offset = (phase: number) => (phase - enterStart + 4) % 4
+    const move = (event: PointerEvent) => {
+      pointer.x = event.clientX / window.innerWidth * 2 - 1
+      pointer.y = event.clientY / window.innerHeight * 2 - 1
+    }
+    const tick = (now: number) => {
+      frame = requestAnimationFrame(tick)
+      const element = panel.current
+      if (!element) return
+      const dt = Math.min(0.1, (now - last) / 1000)
+      last = now
+      const at = offset(chapterPhase())
+      const arrive = THREE.MathUtils.smoothstep(at, 0, offset(enterEnd))
+      const leave = THREE.MathUtils.smoothstep(at, offset(exitStart), offset(exitEnd))
+      const presence = arrive * (1 - leave)
+      // Hysteresis so the letters replay once per arrival, never flicker.
+      if (!shown && presence > 0.5) { shown = true; setPresent(true) }
+      if (shown && presence < 0.04) { shown = false; setPresent(false) }
+      element.style.visibility = presence > 0.005 ? 'visible' : 'hidden'
+      element.style.opacity = presence.toFixed(3)
+      if (reduced.matches) { element.style.transform = 'none'; return }
+      const ease = 1 - Math.exp(-dt * 3)
+      tilt.x += (pointer.x - tilt.x) * ease
+      tilt.y += (pointer.y - tilt.y) * ease
+      const t = now / 1000
+      const depth = -900 * (1 - arrive) ** 2 + 560 * leave ** 1.6
+      const turnY = -16 * (1 - arrive) + 12 * leave + tilt.x * 8
+      const turnX = 6 * (1 - arrive) - 4 * leave - tilt.y * 5
+      element.style.transform = `translate3d(${(1 - arrive) * -40}px, ${Math.sin(t * 0.6 + seed) * 7}px, ${depth.toFixed(1)}px) rotateY(${turnY.toFixed(2)}deg) rotateX(${turnX.toFixed(2)}deg) rotateZ(${(Math.sin(t * 0.4 + seed) * 0.6).toFixed(2)}deg)`
+    }
+    window.addEventListener('pointermove', move, { passive: true })
+    frame = requestAnimationFrame(tick)
+    return () => {
+      cancelAnimationFrame(frame)
+      window.removeEventListener('pointermove', move)
+    }
+  }, [enterStart, enterEnd, exitStart, exitEnd])
+  return <div ref={stage} className={`title-stage ${className}${present ? ' is-present' : ''}`}>
+    <div ref={panel} className="title-panel">
+      <span className="title-index" aria-hidden="true">{index}</span>
+      {children(present)}
+      <span className="title-scan" aria-hidden="true" />
+    </div>
+  </div>
+}
+
 // Chapter one, rendered twice: once at the top and once after Potential as the seam for the infinite loop.
 function SignalChapter({ id, hidden = false }: { id: string; hidden?: boolean }) {
   return (
       <section id={id} className="chapter signal" aria-hidden={hidden || undefined}>
         <div className="chapter-index">Signal</div>
-        <div className="hero-copy">
-          <RainHeadline hero lines={['Learn to build', 'this in one day']} />
+        {!hidden && <FloatingTitle className="title-signal" index="01 · Signal" enter={[3.86, 3.98]} exit={[0.28, 0.6]}>{(present) => <div className="hero-copy">
+          <RainHeadline hero lines={['Learn to build', 'this in one day']} active={present} />
           <p className="deck">Every breakthrough starts as a small, living pattern inside the noise.</p>
-        </div>
+        </div>}</FloatingTitle>}
         <div className="scroll-prompt">Scroll to decode</div>
       </section>
   )
@@ -2537,7 +2608,8 @@ function PotentialChapter({ id, hidden = false }: { id: string; hidden?: boolean
   return (
       <section id={id} className="chapter potential" aria-label={hidden ? undefined : 'Chapter four: Potential'} aria-hidden={hidden || undefined} inert={hidden || undefined}>
         <p>Potential</p>
-        <div className="potential-copy"><RainHeadline lines={['Learn to Create', 'Web Experiences', 'like this']} onReveal={revealTitle} />{!hidden && <span className="cta-anchor"><a className={`cta ${titleRevealed ? 'cta-arriving' : 'cta-waiting'}`} href="https://claude-expert.pages.dev/"><span className="cta-sweep" aria-hidden="true" /><span className="cta-glyphs" aria-hidden="true">ᚫ ⊹ ᛟ ⌁</span><span className="cta-label">become claude.expert</span><span className="cta-arrow" aria-hidden="true">↗︎</span></a></span>}</div>
+        {!hidden && <FloatingTitle className="title-potential" index="04 · Potential" enter={[3.04, 3.18]} exit={[3.7, 3.84]}>{(present) => <div className="potential-copy"><RainHeadline lines={['Learn to Create', 'Web Experiences', 'like this']} onReveal={revealTitle} active={present} /></div>}</FloatingTitle>}
+        {!hidden && <span className="cta-anchor"><a className={`cta ${titleRevealed ? 'cta-arriving' : 'cta-waiting'}`} href="https://claude-expert.pages.dev/"><span className="cta-sweep" aria-hidden="true" /><span className="cta-glyphs" aria-hidden="true">ᚫ ⊹ ᛟ ⌁</span><span className="cta-label">become claude.expert</span><span className="cta-arrow" aria-hidden="true">↗︎</span></a></span>}
       </section>
   )
 }
