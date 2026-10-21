@@ -1083,8 +1083,9 @@ function VoidField({ motion, reducedMotion }: { motion: RefObject<SwarmMotion>; 
     live.uFace.value = THREE.MathUtils.smoothstep(phase, 1.08, 1.68)
       * (1 - THREE.MathUtils.smoothstep(phase, 2.08, 2.36))
     // The two irises bloom from their pupils toward the rim, like eyelids
-    // lifting. Keeping this separate from the mask gather lets it feel alive.
-    live.uEyeOpen.value = THREE.MathUtils.smoothstep(phase, 1.33, 1.53)
+    // lifting. They wait until the face has fully gathered, then open a beat
+    // later; keeping this separate from the mask gather lets it feel alive.
+    live.uEyeOpen.value = THREE.MathUtils.smoothstep(phase, 1.6, 1.74)
       * (1 - THREE.MathUtils.smoothstep(phase, 2.04, 2.22))
     live.uPointerActive.value = THREE.MathUtils.lerp(live.uPointerActive.value, motion.current.active && !reducedMotion ? 1 : 0, 1 - Math.exp(-Math.min(delta, 0.1) * 3))
     if (!faceDrag.current.active) {
