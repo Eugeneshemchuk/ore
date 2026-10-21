@@ -1097,9 +1097,9 @@ function VoidField({ motion, reducedMotion }: { motion: RefObject<SwarmMotion>; 
     const dt = Math.min(delta, 0.1)
     const live = material.current.uniforms
     const entering = THREE.MathUtils.smoothstep(phase, 0.42, 0.9)
-    // Preserve the mask while the camera passes through it, then let the
-    // particles disperse into the following scene.
-    const leaving = 1 - THREE.MathUtils.smoothstep(phase, 2.4, 2.66)
+    // Once poured into the brain, the particles stay part of it and leave
+    // only together with the network's links.
+    const leaving = 1 - THREE.MathUtils.smoothstep(phase, 2.86, 3.06)
     live.uTime.value = reducedMotion ? 0 : clock.getElapsedTime()
     live.uOpacity.value = entering * leaving
     live.uDpr.value = gl.getPixelRatio()
