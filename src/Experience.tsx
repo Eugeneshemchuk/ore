@@ -455,6 +455,9 @@ function DigitalRain({ reducedMotion }: { reducedMotion: boolean }) {
 
 const NEURON_ANCHOR = new THREE.Vector3(0, 0, 0.9)
 // Radius of each iris disc in the mask's eye sockets.
+// Fixed quarter turn on every axis, baked into the seed so clicks and drag
+// rotation keep working in the network's local space.
+const NETWORK_TURN = new THREE.Euler(Math.PI / 2, Math.PI / 2, Math.PI / 2)
 const IRIS_RADIUS = 0.14
 
 type RepulsionUniforms = {
@@ -578,7 +581,7 @@ function NeuralNetwork({ group, repulsion, reducedMotion }: { group: RefObject<T
         (Math.sin(angle) * radius * 1.16 + (1 - radius) * 0.24) * 1.2,
         side * lobeWidth * crown * 0.75,
         Math.cos(angle * 1.43) * radius * 0.76 + Math.sin(lobeIndex * 17.1) * 0.12,
-      )
+      ).applyEuler(NETWORK_TURN)
     }
     // Keep both hemispheres so the field can sit in the mask's crown as a
     // recognisable neural brain, rather than reading as a graph beside it.
