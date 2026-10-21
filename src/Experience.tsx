@@ -1777,6 +1777,11 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
   const drag = useRef({ active: false, x: 0, y: 0 })
   const spin = useRef(new THREE.Vector2())
   const spinVelocity = useRef(new THREE.Vector2())
+  // The rock can be grabbed as soon as it is clearly visible, even while it
+  // is still a small shape in the distance: a generous screen-space disc
+  // around it counts, not only a precise hit on its surface.
+  const grabbable = useRef(false)
+  const grabBounds = useMemo(() => ({ box: new THREE.Box3(), sphere: new THREE.Sphere(), centre: new THREE.Vector3(), edge: new THREE.Vector3(), right: new THREE.Vector3() }), [])
   const raycaster = useMemo(() => new THREE.Raycaster(), [])
   const scanOrigins = useMemo(() => Array.from({ length: ORE_RIPPLE_COUNT }, () => new THREE.Vector3()), [])
   const scanTimes = useMemo(() => new Float64Array(ORE_RIPPLE_COUNT).fill(-1000), [])
@@ -1902,7 +1907,7 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
     }
     const down = (e: PointerEvent) => {
       // Touch gestures belong to native scrolling; dragging the rock is a mouse interaction.
-      if (e.pointerType === 'touch' || !hit.current) return
+      if (e.pointerType === 'touch' || !grabbable.current) return
       e.preventDefault()
       drag.current = { active: true, x: e.clientX, y: e.clientY }
       spinVelocity.current.set(0, 0)
@@ -1911,7 +1916,7 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
     const up = () => {
       if (!drag.current.active) return
       drag.current.active = false
-      document.body.style.cursor = hit.current ? 'grab' : ''
+      document.body.style.cursor = grabbable.current ? 'grab' : ''
     }
     const leave = (e: PointerEvent) => {
       if (!e.relatedTarget) mouse.current.set(100, 100)
@@ -2010,7 +2015,22 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
         if (age < ORE_RIPPLE_LIFETIME) group.current.localToWorld(scanWorld)
         scanUniforms.uScans.value[i].set(scanWorld.x, scanWorld.y, scanWorld.z, age)
       }
-      if (hit.current !== wasHit && !drag.current.active) document.body.style.cursor = hit.current ? 'grab' : ''
+      const wasGrabbable = grabbable.current
+      grabbable.current = false
+      if (visible > 0.5 && pointerKind.current !== 'touch') {
+        if (hit.current) grabbable.current = true
+        else {
+          grabBounds.box.setFromObject(group.current).getBoundingSphere(grabBounds.sphere)
+          grabBounds.right.setFromMatrixColumn(camera.matrixWorld, 0)
+          grabBounds.centre.copy(grabBounds.sphere.center).project(camera)
+          grabBounds.edge.copy(grabBounds.sphere.center).addScaledVector(grabBounds.right, grabBounds.sphere.radius).project(camera)
+          const radius = Math.max(Math.abs(grabBounds.edge.x - grabBounds.centre.x) * size.width / 2 * 1.15, 70)
+          const dx = (mouse.current.x - grabBounds.centre.x) * size.width / 2
+          const dy = (mouse.current.y - grabBounds.centre.y) * size.height / 2
+          grabbable.current = grabBounds.centre.z < 1 && Math.hypot(dx, dy) < radius
+        }
+      }
+      if (grabbable.current !== wasGrabbable && !drag.current.active) document.body.style.cursor = grabbable.current ? 'grab' : ''
     }
     materials.current.forEach((material) => {
       material.opacity = visible
