@@ -2613,12 +2613,10 @@ function FloatingTitle({ enter, exit, index, className, children }: { enter: [nu
 function SignalChapter({ id, hidden = false }: { id: string; hidden?: boolean }) {
   return (
       <section id={id} className="chapter signal" aria-hidden={hidden || undefined}>
-        <div className="chapter-index">Signal</div>
         {!hidden && <FloatingTitle className="title-signal" index="01 · Signal" enter={[3.86, 3.98]} exit={[0.28, 0.6]}>{(present) => <div className="hero-copy">
           <RainHeadline hero lines={['Learn to build', 'this in one day']} active={present} />
           <p className="deck">Every breakthrough starts as a small, living pattern inside the noise.</p>
         </div>}</FloatingTitle>}
-        <div className="scroll-prompt">Scroll to decode</div>
       </section>
   )
 }
@@ -2629,7 +2627,6 @@ function PotentialChapter({ id, hidden = false }: { id: string; hidden?: boolean
   const revealTitle = useMemo(() => () => setTitleRevealed(true), [])
   return (
       <section id={id} className="chapter potential" aria-label={hidden ? undefined : 'Chapter four: Potential'} aria-hidden={hidden || undefined} inert={hidden || undefined}>
-        <p>Potential</p>
         {!hidden && <FloatingTitle className="title-potential" index="04 · Potential" enter={[3.04, 3.18]} exit={[3.7, 3.84]}>{(present) => <div className="potential-copy"><RainHeadline lines={['Learn to Create', 'Web Experiences', 'like this']} onReveal={revealTitle} active={present} /></div>}</FloatingTitle>}
         {!hidden && <span className="cta-anchor"><a className={`cta ${titleRevealed ? 'cta-arriving' : 'cta-waiting'}`} href="https://claude-expert.pages.dev/"><span className="cta-sweep" aria-hidden="true" /><span className="cta-glyphs" aria-hidden="true">ᚫ ⊹ ᛟ ⌁</span><span className="cta-label">become claude.expert</span><span className="cta-arrow" aria-hidden="true">↗︎</span></a></span>}
       </section>
