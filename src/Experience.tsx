@@ -2519,7 +2519,7 @@ function RainHeadline({ lines, hero = false, onReveal, active }: { lines: string
   })
   const content = <span aria-hidden="true">{lines.map((line, index) => <span key={index} className="rain-line">{rainLetters(line, lines.slice(0, index).reduce((sum, previous) => sum + [...previous].length + 1, 0))}</span>)}</span>
   const label = lines.join(' ')
-  const className = `rain-headline ${hero ? 'headline-fall' : onReveal ? 'headline-crystal' : 'headline-neural'} ${revealed ? 'is-revealed' : 'is-waiting'}`
+  const className = `rain-headline ${hero ? 'headline-glitch' : onReveal ? 'headline-crystal' : 'headline-neural'} ${revealed ? 'is-revealed' : 'is-waiting'}`
   return hero ? <h1 ref={heading} className={className} aria-label={label}>{content}</h1> : <h2 ref={heading} className={className} aria-label={label}>{content}</h2>
 }
 
