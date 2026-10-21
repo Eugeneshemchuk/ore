@@ -2481,8 +2481,7 @@ export function Experience() {
       </section>
 
       <section id="mind" className="chapter mind" aria-label="Chapter three: Mind">
-        <p>Mind</p>
-        <FloatingTitle className="title-mind" index="03 · Mind" enter={[2.24, 2.36]} exit={[2.66, 2.84]}>{(present) => <RainHeadline lines={['Connect', 'the dots']} active={present} />}</FloatingTitle>
+        <FloatingTitle className="title-mind" index="03 · Mind" enter={[2.32, 2.44]} exit={[2.68, 2.84]}>{(present) => <RainHeadline lines={['Connect', 'the dots']} active={present} />}</FloatingTitle>
       </section>
       <PotentialChapter id="potential" />
       <SignalChapter id="loop" hidden />
