@@ -729,7 +729,15 @@ function CosmicParticles({ repulsion }: { repulsion: RepulsionUniforms }) {
   const material = useRef<THREE.PointsMaterial>(null)
   const mindField = useRef<THREE.Points>(null)
   const mindMaterial = useRef<THREE.PointsMaterial>(null)
-  const repelShader = useMemo(() => (shader: THREE.WebGLProgramParametersWithUniforms) => configureRepulsion(shader, repulsion), [repulsion])
+  // The camera flies through this dust, so cap each point's size and draw it
+  // as a disc; otherwise nearby specks swell into flat grey squares.
+  const dustShader = useMemo(() => (shader: THREE.WebGLProgramParametersWithUniforms) => {
+    configureRepulsion(shader, repulsion)
+    shader.vertexShader = shader.vertexShader.replace('#include <fog_vertex>', `#include <fog_vertex>
+      gl_PointSize = min(gl_PointSize, 4.5);`)
+    shader.fragmentShader = shader.fragmentShader.replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>
+      if (length(gl_PointCoord - 0.5) > 0.5) discard;`)
+  }, [repulsion])
   const geometry = useMemo(() => {
     const positions = new Float32Array(620 * 3)
     for (let i = 0; i < 620; i += 1) {
@@ -770,10 +778,10 @@ function CosmicParticles({ repulsion }: { repulsion: RepulsionUniforms }) {
   })
   return <>
     <points ref={field} geometry={geometry}>
-      <pointsMaterial ref={material} color="#d7e2e2" size={0.024} sizeAttenuation transparent opacity={0.14} depthWrite={false} onBeforeCompile={repelShader} />
+      <pointsMaterial ref={material} color="#d7e2e2" size={0.024} sizeAttenuation transparent opacity={0.14} depthWrite={false} onBeforeCompile={dustShader} />
     </points>
     <points ref={mindField} geometry={mindGeometry}>
-      <pointsMaterial ref={mindMaterial} color="#d7e2e2" size={0.03} sizeAttenuation transparent opacity={0} depthWrite={false} onBeforeCompile={repelShader} />
+      <pointsMaterial ref={mindMaterial} color="#d7e2e2" size={0.03} sizeAttenuation transparent opacity={0} depthWrite={false} onBeforeCompile={dustShader} />
     </points>
   </>
 }
@@ -1424,7 +1432,7 @@ function CameraDirector({ reducedMotion, oreGroup, motion }: { reducedMotion: bo
   const mindCrossPosition = useMemo(() => new THREE.Vector3(0.16, 1.54, -4.82), [])
   const mindExitPosition = useMemo(() => new THREE.Vector3(-0.16, 1.32, -7.55), [])
   const asteroidDistantPosition = useMemo(() => new THREE.Vector3(-0.06, 1.32, -7.62), [])
-  const asteroidNearPosition = useMemo(() => new THREE.Vector3(0.48, 1.06, -12.66), [])
+  const asteroidNearPosition = useMemo(() => new THREE.Vector3(0.48, 1.06, -17.66), [])
   const signalPosition = useMemo(() => new THREE.Vector3(0, 0, 6.3), [])
   const signalLook = useMemo(() => new THREE.Vector3(0, 0, 0), [])
   const voidLook = useMemo(() => new THREE.Vector3(0, 0, -5.8), [])
@@ -1433,8 +1441,8 @@ function CameraDirector({ reducedMotion, oreGroup, motion }: { reducedMotion: bo
   const mindApproachLook = useMemo(() => new THREE.Vector3(0.02, 1.6, -4.72), [])
   const mindInnerLook = useMemo(() => new THREE.Vector3(-0.08, 1.58, -5.0), [])
   const mindCrossLook = useMemo(() => new THREE.Vector3(0.12, 1.48, -5.7), [])
-  const mindExitLook = useMemo(() => new THREE.Vector3(0.42, 1.12, -14.5), [])
-  const oreLook = useMemo(() => new THREE.Vector3(0.42, 1.12, -14.5), [])
+  const mindExitLook = useMemo(() => new THREE.Vector3(0.42, 1.12, -19.5), [])
+  const oreLook = useMemo(() => new THREE.Vector3(0.42, 1.12, -19.5), [])
   const oreCenter = useMemo(() => new THREE.Vector3(), [])
   useFrame(({ clock }, delta) => {
     const phase = chapterPhase()
@@ -1934,7 +1942,7 @@ function OreCrystal({ group, crystalTip, reducedMotion }: { group: RefObject<THR
   })
 
   const keep = (material: THREE.Material | null) => { if (material && !materials.current.includes(material)) materials.current.push(material) }
-  return <group ref={outer} position={[mobile ? 0.32 : 0.48, 1.12, -14.5]}>
+  return <group ref={outer} position={[mobile ? 0.32 : 0.48, 1.12, -19.5]}>
     <group ref={group}>
       <mesh geometry={scene.rock}>
         <meshStandardMaterial ref={keep} color="#262827" envMap={envMap} envMapIntensity={0.35} roughness={0.94} metalness={0.08} onBeforeCompile={rockShader} flatShading transparent opacity={0} />
@@ -2341,8 +2349,31 @@ function SoundToggle() {
   </div>
 }
 
+const CHAPTERS = ['Signal', 'Void', 'Mind', 'Potential']
+
+// Highlight the chapter in view. The tail of Potential is the loop back into
+// Signal, so it already counts as Signal.
+function useActiveChapter() {
+  const [active, setActive] = useState(0)
+  useEffect(() => {
+    const update = () => {
+      const phase = rawChapterPhase()
+      setActive(phase >= 3.82 ? 0 : Math.floor(phase))
+    }
+    update()
+    window.addEventListener('scroll', update, { passive: true })
+    window.addEventListener('resize', update)
+    return () => {
+      window.removeEventListener('scroll', update)
+      window.removeEventListener('resize', update)
+    }
+  }, [])
+  return active
+}
+
 export function Experience() {
   useScrollProgress()
+  const activeChapter = useActiveChapter()
   const { reducedMotion, documentVisible } = useRenderPreferences()
   useIdleJourney(reducedMotion)
   return (
@@ -2352,10 +2383,7 @@ export function Experience() {
         <a className="brand" href="#signal" aria-label="Claude Expert home">claude<span>.expert</span></a>
         <div className="chrome-controls">
           <nav aria-label="Chapters">
-            <a className="is-active" href="#signal">Signal</a>
-            <a href="#void">Void</a>
-            <a href="#mind">Mind</a>
-            <a href="#potential">Potential</a>
+            {CHAPTERS.map((chapter, index) => <a key={chapter} className={index === activeChapter ? 'is-active' : undefined} aria-current={index === activeChapter ? 'location' : undefined} href={`#${chapter.toLowerCase()}`}>{chapter}</a>)}
           </nav>
           <SoundToggle />
         </div>
@@ -2425,7 +2453,7 @@ function PotentialChapter({ id, hidden = false }: { id: string; hidden?: boolean
   return (
       <section id={id} className="chapter potential" aria-label={hidden ? undefined : 'Chapter four: Potential'} aria-hidden={hidden || undefined} inert={hidden || undefined}>
         <p>Potential</p>
-        <div className="potential-copy"><RainHeadline lines={['Learn to Create', 'Web Experiences', 'like this']} onReveal={revealTitle} /><span className="cta-anchor"><a className={`cta ${titleRevealed ? 'cta-arriving' : 'cta-waiting'}`} href="https://claude-expert.pages.dev/"><span className="cta-sweep" aria-hidden="true" /><span className="cta-glyphs" aria-hidden="true">ᚫ ⊹ ᛟ ⌁</span><span className="cta-label">become claude.expert</span><span className="cta-arrow" aria-hidden="true">↗︎</span></a></span></div>
+        <div className="potential-copy"><RainHeadline lines={['Learn to Create', 'Web Experiences', 'like this']} onReveal={revealTitle} />{!hidden && <span className="cta-anchor"><a className={`cta ${titleRevealed ? 'cta-arriving' : 'cta-waiting'}`} href="https://claude-expert.pages.dev/"><span className="cta-sweep" aria-hidden="true" /><span className="cta-glyphs" aria-hidden="true">ᚫ ⊹ ᛟ ⌁</span><span className="cta-label">become claude.expert</span><span className="cta-arrow" aria-hidden="true">↗︎</span></a></span>}</div>
       </section>
   )
 }
