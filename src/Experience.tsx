@@ -8,6 +8,7 @@ const RUNES = [...'ᚫϟ⊹ᛟ⌁⋔ᚢϞ⊙ᚨ⌇⟐ᛉ∴']
 const KATAKANA = [...'ﾊﾐﾋｰｳｼﾅﾓﾆｻﾜﾂｵﾘｱﾎﾃﾏｹﾒｴｶｷﾑﾕﾗｾﾈｽﾀﾇﾍ']
 const ATLAS_COLUMNS = 8
 const RAIN_CELL_PX = window.innerWidth < 720 ? 15 : 19
+const GLYPH_COUNT = window.innerWidth < 720 ? 600 : 1180
 
 // Scene progress 0..1 across the three chapters, rewinding to 0 while the looped copy of chapter one scrolls in.
 // The page repeats every loop period, so positions in the lead-in copy of chapter three map onto the real one.
@@ -52,7 +53,15 @@ const rainFragmentShader = /* glsl */ `
   }
 
   void main() {
-    vec2 grid = vUv * uCells;
+    // Black hole under the cursor: glyphs are lensed outward around it and swallowed at its core.
+    vec2 aspect = vec2(uCells.x / uCells.y, 1.0);
+    vec2 toPointer = (vUv - uPointer) * aspect;
+    float dist = length(toPointer);
+    vec2 uv = vUv + normalize(toPointer + 0.0001) / aspect * smoothstep(0.24, 0.0, dist) * 0.06;
+    float core = smoothstep(0.035, 0.11, dist);
+    float horizon = smoothstep(0.05, 0.1, dist) * smoothstep(0.17, 0.1, dist);
+
+    vec2 grid = uv * uCells;
     vec2 cell = floor(grid);
     vec2 local = fract(grid);
     float row = uCells.y - 1.0 - cell.y;
@@ -60,9 +69,7 @@ const rainFragmentShader = /* glsl */ `
     float a = drop(cell.x, row, 0.0);
     float b = drop(cell.x, row, 41.0);
     float t = a < 0.0 ? b : (b < 0.0 ? a : min(a, b));
-
-    float near = smoothstep(0.22, 0.0, length((vUv - uPointer) * vec2(uCells.x / uCells.y, 1.0)));
-    if (t < 0.0 && near < 0.01) discard;
+    if (t < 0.0 || core < 0.01) discard;
 
     // Symbols mutate, faster near the head of a drop.
     float rate = mix(9.0, 1.2, clamp(t, 0.0, 1.0)) * (0.4 + hash(cell));
@@ -72,15 +79,62 @@ const rainFragmentShader = /* glsl */ `
     vec2 gradient = vUv * uCells / uAtlasGrid;
     float ink = textureGrad(uAtlas, vec2(atlasUv.x, 1.0 - atlasUv.y), dFdx(gradient), dFdy(gradient)).a;
 
-    float leader = t >= 0.0 ? step(t, 0.02) : 0.0;
-    float tail = t >= 0.0 ? pow(1.0 - t, 1.6) : 0.0;
+    float leader = step(t, 0.02);
+    float tail = pow(1.0 - t, 1.6);
     vec3 green = vec3(0.12, 1.0, 0.42);
-    vec3 color = green * tail * 0.85 + vec3(0.78, 1.0, 0.86) * leader * 1.4 + green * near * 0.35;
+    vec3 color = green * tail * (0.85 + horizon * 0.8) + vec3(0.78, 1.0, 0.86) * leader * 1.4;
     float glow = exp(-dot(local - 0.5, local - 0.5) * 9.0) * leader * 0.18;
     // Thin the rain behind the headline so the copy stays legible.
     vec2 screen = (vUv - 0.5) * 1.2 + 0.5;
     float copy = smoothstep(0.62, 0.42, screen.x) * smoothstep(0.22, 0.38, screen.y) * smoothstep(0.78, 0.62, screen.y);
-    gl_FragColor = vec4(color * ink + green * glow, 1.0) * uOpacity * (1.0 - copy * 0.6);
+    gl_FragColor = vec4(color * ink + green * glow, 1.0) * uOpacity * core * (1.0 - copy * 0.6);
+  }
+`
+
+// The original hero point cloud, now the backdrop for chapters two and three.
+// Points near the cursor are measured in screen space so the black hole tracks it regardless of depth or camera drift.
+const glyphVertexShader = /* glsl */ `
+  uniform float uTime;
+  uniform vec2 uPointer;
+  uniform float uAspect;
+  attribute float aSeed;
+  attribute float aSize;
+  varying float vSignal;
+  varying float vPull;
+  void main() {
+    vec3 p = position;
+    float wave = sin(p.y * 1.9 + uTime * 0.55 + aSeed * 10.0);
+    p.x += wave * 0.12;
+    p.z += sin(p.x * 2.4 + uTime * 0.3) * 0.06;
+    vSignal = smoothstep(0.78, 0.98, fract(aSeed * 19.13 + uTime * 0.025 + p.y * 0.075));
+    vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
+    vec4 clip = projectionMatrix * mvPosition;
+    vec2 delta = (clip.xy / clip.w - uPointer) * vec2(uAspect, 1.0);
+    float influence = smoothstep(0.5, 0.0, length(delta));
+    vec2 away = normalize(delta + 0.0001);
+    // Push out of the core and swirl around it, scaled by depth so near and far points clear the same screen area.
+    vec2 push = (away * 0.55 + vec2(-away.y, away.x) * 0.35) * influence * influence * -mvPosition.z * 0.32;
+    mvPosition.xy += push;
+    vPull = influence;
+    gl_PointSize = aSize * (62.0 / -mvPosition.z) * (1.0 - influence * 0.6);
+    gl_Position = projectionMatrix * mvPosition;
+  }
+`
+
+const glyphFragmentShader = /* glsl */ `
+  uniform float uOpacity;
+  varying float vSignal;
+  varying float vPull;
+  void main() {
+    vec2 uv = gl_PointCoord - 0.5;
+    float edge = 1.0 - smoothstep(0.34, 0.5, max(abs(uv.x), abs(uv.y)));
+    float notch = step(0.18, abs(uv.x)) * step(0.18, abs(uv.y));
+    float glyph = edge * (1.0 - notch * 0.55);
+    vec3 mineral = vec3(0.80, 0.86, 0.88);
+    vec3 ember = vec3(0.94, 0.31, 0.17);
+    // Points caught at the event horizon heat up toward ember.
+    vec3 color = mix(mineral, ember, max(vSignal, vPull * 0.7));
+    gl_FragColor = vec4(color, glyph * mix(0.24, 0.95, vSignal) * uOpacity);
   }
 `
 
@@ -191,6 +245,54 @@ function DigitalRain() {
     <planeGeometry args={[plane.width, plane.height]} />
     <shaderMaterial ref={material} transparent depthWrite={false} blending={THREE.AdditiveBlending} uniforms={uniforms} vertexShader={rainVertexShader} fragmentShader={rainFragmentShader} />
   </mesh>
+}
+
+function GlyphField() {
+  const material = useRef<THREE.ShaderMaterial>(null)
+  const pointer = useRef(new THREE.Vector2(9, 9))
+  const { pointer: cursor, size } = useThree()
+  const geometry = useMemo(() => {
+    const positions = new Float32Array(GLYPH_COUNT * 3)
+    const seeds = new Float32Array(GLYPH_COUNT)
+    const sizes = new Float32Array(GLYPH_COUNT)
+    for (let i = 0; i < GLYPH_COUNT; i += 1) {
+      const i3 = i * 3
+      positions[i3] = (Math.random() - 0.5) * 13
+      positions[i3 + 1] = (Math.random() - 0.5) * 8
+      positions[i3 + 2] = (Math.random() - 0.5) * 4 - 1.6
+      seeds[i] = Math.random()
+      sizes[i] = 0.48 + Math.random() * 0.8
+    }
+    const result = new THREE.BufferGeometry()
+    result.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    result.setAttribute('aSeed', new THREE.BufferAttribute(seeds, 1))
+    result.setAttribute('aSize', new THREE.BufferAttribute(sizes, 1))
+    return result
+  }, [])
+  const uniforms = useMemo(() => ({
+    uTime: { value: 0 },
+    uOpacity: { value: 0 },
+    uAspect: { value: 1 },
+    uPointer: { value: new THREE.Vector2(9, 9) },
+  }), [])
+  useEffect(() => () => geometry.dispose(), [geometry])
+
+  useFrame(({ clock }) => {
+    if (!material.current) return
+    // Fades in as the digital rain fades out, so it carries chapters two and three.
+    const visible = THREE.MathUtils.smoothstep(loopProgress(), 0.08, 0.45)
+    pointer.current.lerp(cursor, 0.08)
+    const live = material.current.uniforms
+    live.uTime.value = clock.getElapsedTime()
+    live.uOpacity.value = visible
+    live.uAspect.value = size.width / Math.max(1, size.height)
+    live.uPointer.value.copy(pointer.current)
+    material.current.visible = visible > 0.001
+  })
+
+  return <points geometry={geometry} frustumCulled={false}>
+    <shaderMaterial ref={material} transparent depthWrite={false} blending={THREE.AdditiveBlending} uniforms={uniforms} vertexShader={glyphVertexShader} fragmentShader={glyphFragmentShader} />
+  </points>
 }
 
 function NeuralNetwork({ progress }: { progress: number }) {
@@ -331,6 +433,29 @@ function rockRadius(d: THREE.Vector3) {
   return r
 }
 
+// Fresnel rim for the hover shell: brightest where the surface turns away from the camera.
+const haloVertexShader = /* glsl */ `
+  varying vec3 vNormal;
+  varying vec3 vView;
+  void main() {
+    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+    vNormal = normalize(normalMatrix * normal);
+    vView = normalize(-mvPosition.xyz);
+    gl_Position = projectionMatrix * mvPosition;
+  }
+`
+
+const haloFragmentShader = /* glsl */ `
+  uniform float uIntensity;
+  uniform vec3 uColor;
+  varying vec3 vNormal;
+  varying vec3 vView;
+  void main() {
+    float rim = pow(1.0 - abs(dot(normalize(vNormal), vView)), 2.4);
+    gl_FragColor = vec4(uColor * (rim + 0.06) * uIntensity, 1.0);
+  }
+`
+
 function OreCrystal() {
   const outer = useRef<THREE.Group>(null)
   const group = useRef<THREE.Group>(null)
@@ -382,7 +507,16 @@ function OreCrystal() {
       position: new THREE.Vector3(Math.cos(i * 0.9) * (1.9 + (i % 3) * 0.25), Math.sin(i * 1.9) * 0.9, Math.sin(i * 0.9) * 1.6),
       scale: 0.07 + (i % 3) * 0.05,
     }))
-    const grid = new THREE.WireframeGeometry(new THREE.SphereGeometry(1.5, 18, 12))
+    // Hover shell: a coarser copy of the rock pushed just off its surface, so the glowing mesh hugs the whole asteroid.
+    const shell = new THREE.IcosahedronGeometry(1, 3)
+    const shellPos = shell.attributes.position
+    for (let i = 0; i < shellPos.count; i += 1) {
+      v.fromBufferAttribute(shellPos, i).normalize()
+      v.multiplyScalar(rockRadius(v) * 1.035)
+      shellPos.setXYZ(i, v.x, v.y, v.z)
+    }
+    const grid = new THREE.WireframeGeometry(shell)
+    shell.dispose()
     // Ryugu is strewn with boulders, with one oversized block near the south pole.
     const boulders = Array.from({ length: 36 }, (_, i) => {
       const y = i === 0 ? -0.96 : 1 - (i / 35) * 2
@@ -392,7 +526,15 @@ function OreCrystal() {
     })
     return { rock, crystals, rubble, boulders, grid }
   }, [])
-  const gridMaterial = useMemo(() => new THREE.LineBasicMaterial({ color: '#b9d6df', transparent: true, opacity: 0, depthWrite: false }), [])
+  const gridMaterial = useMemo(() => new THREE.LineBasicMaterial({ color: '#cfeaf2', transparent: true, opacity: 0, depthWrite: false, blending: THREE.AdditiveBlending }), [])
+  const haloMaterial = useMemo(() => new THREE.ShaderMaterial({
+    uniforms: { uIntensity: { value: 0 }, uColor: { value: new THREE.Color('#9fd8e8') } },
+    vertexShader: haloVertexShader,
+    fragmentShader: haloFragmentShader,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+  }), [])
 
   useEffect(() => {
     // The canvas ignores pointer events (content sits above it), so track the cursor and drags on the window.
@@ -438,8 +580,9 @@ function OreCrystal() {
       scene.grid.dispose()
       scene.crystals.forEach((c) => c.geometry.dispose())
       gridMaterial.dispose()
+      haloMaterial.dispose()
     }
-  }, [envMap, scene, gridMaterial])
+  }, [envMap, scene, gridMaterial, haloMaterial])
 
   useFrame(({ clock, camera }) => {
     const p = loopProgress()
@@ -465,7 +608,13 @@ function OreCrystal() {
       material.opacity = visible
       material.visible = visible > 0.001
     })
-    gridMaterial.opacity = hover.current * visible * 0.22
+    // Breathe while hovered: the mesh and its rim glow swell and fade together, holding as long as the cursor stays.
+    const pulse = 0.5 + 0.5 * Math.sin(t * 3.2)
+    const glow = hover.current * visible
+    gridMaterial.opacity = glow * (0.3 + pulse * 0.5)
+    gridMaterial.visible = glow > 0.001
+    haloMaterial.uniforms.uIntensity.value = glow * (0.45 + pulse * 0.75)
+    haloMaterial.visible = glow > 0.001
   })
 
   const keep = (material: THREE.Material | null) => { if (material && !materials.current.includes(material)) materials.current.push(material) }
@@ -485,7 +634,8 @@ function OreCrystal() {
         <dodecahedronGeometry args={[1, 0]} />
         <meshStandardMaterial ref={keep} color="#4a4f52" roughness={0.9} metalness={0.3} flatShading transparent opacity={0} />
       </mesh>)}
-      <lineSegments geometry={scene.grid} material={gridMaterial} raycast={() => null} />
+      <lineSegments geometry={scene.grid} material={gridMaterial} renderOrder={2} raycast={() => null} />
+      <mesh geometry={scene.rock} material={haloMaterial} scale={1.06} renderOrder={3} raycast={() => null} />
     </group>
     <pointLight position={[1.4, 2.4, 2.2]} intensity={7} color="#eef4ff" distance={7} />
   </group>
@@ -563,6 +713,9 @@ function SignalCanvas({ progress, paused }: { progress: number; paused: boolean 
       camera={{ position: [0, 0, 6.3], fov: 44 }}
       gl={{ antialias: false, powerPreference: 'high-performance', toneMapping: THREE.ACESFilmicToneMapping }}
       fallback={<div className="canvas-fallback">Knowledge begins as signal.</div>}
+      // The shell ignores pointer events so the copy stays clickable; listen on the body to keep the cursor live.
+      eventSource={document.body}
+      eventPrefix="client"
     >
       <color attach="background" args={['#070809']} />
       <fog attach="fog" args={['#070809', 3.5, 12]} />
@@ -570,6 +723,7 @@ function SignalCanvas({ progress, paused }: { progress: number; paused: boolean 
       <pointLight position={[3, 2, 4]} intensity={14} color="#f06e4e" distance={10} />
       <pointLight position={[-4, -2, 2]} intensity={8} color="#b9d6df" distance={10} />
       <DigitalRain />
+      <GlyphField />
       <CosmicParticles />
       <NeuralNetwork progress={progress} />
       <OreCrystal />
